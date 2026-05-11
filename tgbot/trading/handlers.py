@@ -42,6 +42,13 @@ TRD_WADD_CHAIN = 800
 TRD_WADD_ADDR = 801
 TRD_WADD_LABEL = 802
 
+TRD_AADD_CHAIN = 810
+TRD_AADD_TOKEN = 811
+TRD_AADD_MC = 812
+TRD_AADD_DIR = 813
+TRD_AADD_PERSIST = 814
+TRD_AADD_LABEL = 815
+
 _SOL_ADDR_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _EVM_ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
@@ -682,6 +689,152 @@ def register_handlers(
         ],
     )
     app.add_handler(wadd_conv, group=-1)
+
+    async def aadd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        rows = [[
+            InlineKeyboardButton(c.upper(), callback_data=f"trd:aadd:chain:{c}")
+            for c in SUPPORTED_CHAINS
+        ]]
+        await wizard_step(update, ctx, "➕ Créer alerte MC\n\nChaîne du token :", extra_rows=rows)
+        return TRD_AADD_CHAIN
+
+    async def aadd_chain(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        parts = (query.data or "").split(":")
+        if len(parts) != 4 or parts[3] not in SUPPORTED_CHAINS:
+            return TRD_AADD_CHAIN
+        ctx.user_data["aadd_chain"] = parts[3]
+        await wizard_step(update, ctx, f"Chaîne : *{parts[3].upper()}*\n\nAdresse du token :")
+        return TRD_AADD_TOKEN
+
+    async def aadd_token(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        chain = ctx.user_data.get("aadd_chain")
+        if not chain:
+            await wizard_step(update, ctx, "⚠️ État perdu.")
+            return ConversationHandler.END
+        token = update.message.text.strip()
+        if not validate_address(token, chain):
+            await wizard_step(update, ctx, f"❌ Adresse invalide pour *{chain.upper()}*. Réessaie :")
+            return TRD_AADD_TOKEN
+        ctx.user_data["aadd_token"] = _normalize_address(token, chain)
+        await wizard_step(update, ctx, "Marketcap cible (ex `1m`, `500k`) :")
+        return TRD_AADD_MC
+
+    async def aadd_mc(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        mc = _parse_mc(update.message.text.strip())
+        if mc is None or mc <= 0:
+            await wizard_step(update, ctx, "❌ Marketcap invalide. Réessaie (ex `1m`, `500k`) :")
+            return TRD_AADD_MC
+        ctx.user_data["aadd_mc"] = mc
+        rows = [[
+            InlineKeyboardButton("↑ Above", callback_data="trd:aadd:dir:above"),
+            InlineKeyboardButton("↓ Below", callback_data="trd:aadd:dir:below"),
+        ]]
+        await wizard_step(update, ctx, f"Marketcap : *${_fmt_mc(mc)}*\n\nDéclenchement ?", extra_rows=rows)
+        return TRD_AADD_DIR
+
+    async def aadd_dir(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        parts = (query.data or "").split(":")
+        if len(parts) != 4 or parts[3] not in ("above", "below"):
+            return TRD_AADD_DIR
+        ctx.user_data["aadd_dir"] = parts[3]
+        rows = [[
+            InlineKeyboardButton("One-shot", callback_data="trd:aadd:persist:no"),
+            InlineKeyboardButton("Persistent", callback_data="trd:aadd:persist:yes"),
+        ]]
+        await wizard_step(update, ctx, f"Direction : *{parts[3]}*\n\nType d’alerte ?", extra_rows=rows)
+        return TRD_AADD_PERSIST
+
+    async def aadd_persist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        parts = (query.data or "").split(":")
+        if len(parts) != 4 or parts[3] not in ("yes", "no"):
+            return TRD_AADD_PERSIST
+        ctx.user_data["aadd_persist"] = parts[3] == "yes"
+        await wizard_step(update, ctx, "Label (ou tape `skip`) :")
+        return TRD_AADD_LABEL
+
+    async def aadd_label(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        text = update.message.text.strip()
+        label = None if text.lower() == "skip" else text
+        chain = ctx.user_data.get("aadd_chain")
+        token = ctx.user_data.get("aadd_token")
+        mc = ctx.user_data.get("aadd_mc")
+        direction = ctx.user_data.get("aadd_dir")
+        persistent = ctx.user_data.get("aadd_persist", False)
+        if not all([chain, token, mc, direction]):
+            await wizard_step(update, ctx, "⚠️ État perdu.")
+            return ConversationHandler.END
+        aid = db.add_alert(
+            token_address=token, chain=chain, mc_target=mc,
+            direction=direction, persistent=persistent, label=label,
+        )
+        arrow = "↑" if direction == "above" else "↓"
+        kind = "persistent" if persistent else "one-shot"
+        await wizard_step(
+            update, ctx,
+            f"\U0001f514 Alert *#{aid}* armed: `{token}` MC {arrow} *${_fmt_mc(mc)}* "
+            f"({chain.upper()}, {kind})",
+        )
+        for k in ("aadd_chain", "aadd_token", "aadd_mc", "aadd_dir", "aadd_persist"):
+            ctx.user_data.pop(k, None)
+        await wizard_finish(update, ctx)
+        return ConversationHandler.END
+
+    async def aadd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        for k in ("aadd_chain", "aadd_token", "aadd_mc", "aadd_dir", "aadd_persist"):
+            ctx.user_data.pop(k, None)
+        await wizard_finish(update, ctx)
+        return ConversationHandler.END
+
+    async def aadd_escape(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Catch-all fallback during aadd wizard: clean state and route the
+        callback to the appropriate dispatcher based on namespace."""
+        for k in ("aadd_chain", "aadd_token", "aadd_mc", "aadd_dir", "aadd_persist"):
+            ctx.user_data.pop(k, None)
+        ctx.user_data.pop("wizard_msg_id", None)
+        ctx.user_data.pop("wizard_chat_id", None)
+        data = update.callback_query.data if update.callback_query else ""
+        if data.startswith("trd:"):
+            await on_trading_callback(update, ctx)
+        elif wizard_escape is not None:
+            await wizard_escape(update, ctx)
+        return ConversationHandler.END
+
+    aadd_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(aadd_start, pattern=r"^trd:aadd$")],
+        states={
+            TRD_AADD_CHAIN: [CallbackQueryHandler(aadd_chain, pattern=r"^trd:aadd:chain:")],
+            TRD_AADD_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, aadd_token)],
+            TRD_AADD_MC: [MessageHandler(filters.TEXT & ~filters.COMMAND, aadd_mc)],
+            TRD_AADD_DIR: [CallbackQueryHandler(aadd_dir, pattern=r"^trd:aadd:dir:")],
+            TRD_AADD_PERSIST: [CallbackQueryHandler(aadd_persist, pattern=r"^trd:aadd:persist:")],
+            TRD_AADD_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, aadd_label)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(aadd_cancel, pattern=r"^wiz:cancel$"),
+            CallbackQueryHandler(aadd_escape),
+        ],
+    )
+    app.add_handler(aadd_conv, group=-1)
 
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))
