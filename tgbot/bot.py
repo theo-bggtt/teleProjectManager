@@ -680,9 +680,13 @@ def build_app(cfg: Config) -> Application:
             await _wizard_step(update, ctx, f"⚠️ Pas un dossier : `{path_obj}`.\n\n📄 Envoie un chemin valide.")
             return ADD_PATH
         name = ctx.user_data.get("add_name")
-        if not name or not db.add_project(name, str(path_obj)):
-            await _wizard_step(update, ctx, f"⚠️ Échec : projet `{name}` déjà existant ou état perdu.")
-            await _wizard_finish(update, ctx)
+        if not name:
+            await _wizard_step(update, ctx, "⚠️ État perdu, recommence depuis le menu.")
+            ctx.user_data.pop("add_name", None)
+            return ConversationHandler.END
+        if not db.add_project(name, str(path_obj)):
+            await _wizard_step(update, ctx, f"⚠️ Le projet `{name}` existe déjà.")
+            ctx.user_data.pop("add_name", None)
             return ConversationHandler.END
         await _wizard_finish(update, ctx)
         return ConversationHandler.END
