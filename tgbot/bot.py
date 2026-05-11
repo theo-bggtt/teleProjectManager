@@ -483,7 +483,6 @@ def build_app(cfg: Config) -> Application:
         data = query.data or ""
 
         if data == "wiz:cancel":
-            await update.callback_query.answer()
             await _wizard_finish(update, ctx)
             return
 
