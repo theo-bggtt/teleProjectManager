@@ -420,6 +420,70 @@ def register_handlers(
             if "not modified" not in str(e).lower():
                 raise
 
+    async def _render_holdings_picker(query) -> None:
+        wallets = db.list_wallets()
+        if not wallets:
+            rows = [[
+                InlineKeyboardButton("👛 Aller aux Wallets", callback_data="trd:wallets"),
+            ], [
+                InlineKeyboardButton("⬅️ Retour", callback_data="trd:home"),
+            ]]
+            await query.edit_message_text(
+                "*💰 Holdings*\nAucun wallet surveillé. Ajoute-en un d'abord.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+            return
+        rows: list[list[InlineKeyboardButton]] = []
+        for w in wallets:
+            tag = f" — {w['label']}" if w["label"] else ""
+            short = f"{w['address'][:4]}…{w['address'][-4:]}"
+            rows.append([InlineKeyboardButton(
+                f"{w['chain'].upper()} {short}{tag}",
+                callback_data=f"trd:hget:{w['chain']}:{w['address']}",
+            )])
+        rows.append([InlineKeyboardButton("⬅️ Retour", callback_data="trd:home")])
+        await query.edit_message_text(
+            "*💰 Holdings*\nChoisis un wallet :",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def _render_holdings_for(query, chain: str, addr: str) -> None:
+        await query.edit_message_text(
+            f"⏳ Fetching holdings for `{addr[:6]}…{addr[-4:]}`…",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        try:
+            if chain == "sol":
+                from .solana import fetch_solana_holdings
+                holdings, _ = await fetch_solana_holdings(monitor.helius_api_key, addr)
+            else:
+                from .evm import fetch_evm_holdings
+                holdings, _ = await fetch_evm_holdings(
+                    chain, monitor.alchemy_api_key, addr,
+                    price_client=monitor.price_client,
+                )
+        except Exception as e:
+            logger.exception("inline holdings failed")
+            await query.edit_message_text(
+                f"Error: `{type(e).__name__}: {e}`",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Retour", callback_data="trd:hold")]]
+                ),
+            )
+            return
+        total = sum((h.value_usd or 0) for h in holdings) or None
+        from .formatters import holdings_message
+        text = holdings_message(chain, addr, holdings, total)
+        await query.edit_message_text(
+            text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Retour", callback_data="trd:hold")]]
+            ),
+        )
+
     @auth
     async def on_trading_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -489,6 +553,15 @@ def register_handlers(
                     [[InlineKeyboardButton("⬅️ Retour", callback_data="trd:wallets")]]
                 ),
             )
+            return
+        if action == "hold":
+            await _render_holdings_picker(query)
+            return
+        if action == "hget" and len(parts) >= 4:
+            chain, addr = parts[2], parts[3]
+            if not chain or not addr:
+                return
+            await _render_holdings_for(query, chain, addr)
             return
         if action == "anoop":
             # No-op: row labels (no state change needed)
