@@ -37,6 +37,7 @@ CFG_SELECT, CFG_START_CMD, CFG_ENTRY_FILE = range(3)
 ADD_NAME, ADD_PATH = range(2, 4)
 # add-action conversation states
 ADD_A_NAME, ADD_A_COMMAND, ADD_A_CWD, ADD_A_MODE, ADD_A_CONFIRM = range(4, 9)
+PROJ_SHELL_CMD = 700
 
 # Telegram message limit is ~4096; leave headroom for markdown fences
 INLINE_TEXT_LIMIT = 3500
@@ -400,6 +401,7 @@ def build_app(cfg: Config) -> Application:
             "add_name",
             "addact_name", "addact_command", "addact_cwd", "addact_mode",
             "cfg_project",
+            "shell_project",
         ):
             ctx.user_data.pop(k, None)
         text = "*Menu principal*\nChoisis une action :"
@@ -971,6 +973,52 @@ def build_app(cfg: Config) -> Application:
         )
         return CFG_START_CMD
 
+    async def proj_shell_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            return ConversationHandler.END
+        name = parts[2]
+        proj = db.get_project(name)
+        if not proj:
+            await _wizard_step(update, ctx, f"⚠️ Pas de projet `{name}`.")
+            return ConversationHandler.END
+        ctx.user_data["shell_project"] = name
+        await _wizard_step(
+            update, ctx,
+            f"💻 Shell pour *{name}*\n\nEnvoie la commande à exécuter :",
+        )
+        return PROJ_SHELL_CMD
+
+    async def proj_shell_run(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        name = ctx.user_data.get("shell_project")
+        if not name:
+            await _wizard_step(update, ctx, "⚠️ État perdu, recommence depuis le menu.")
+            return ConversationHandler.END
+        proj = db.get_project(name)
+        if not proj:
+            await _wizard_step(update, ctx, f"⚠️ Projet `{name}` disparu.")
+            return ConversationHandler.END
+        cmd = update.message.text.strip()
+        await _wizard_step(update, ctx, f"⏳ `{cmd}` …")
+        rc, out = await shell.run(cmd, proj["path"])
+        await _send_text_or_file(
+            update, out or "(no output)", f"{name}-shell.txt",
+            header=f"exit {rc}",
+        )
+        await _wizard_finish(update, ctx)
+        return ConversationHandler.END
+
+    async def proj_shell_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        ctx.user_data.pop("shell_project", None)
+        await _wizard_finish(update, ctx)
+        return ConversationHandler.END
+
     async def proj_cfg_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
@@ -1228,7 +1276,7 @@ def build_app(cfg: Config) -> Application:
         Cleans state and lets on_callback handle the navigation by editing the same message."""
         ctx.user_data.pop("wizard_msg_id", None)
         ctx.user_data.pop("wizard_chat_id", None)
-        for k in ("add_name", "addact_name", "addact_command", "addact_cwd", "addact_mode", "cfg_project"):
+        for k in ("add_name", "addact_name", "addact_command", "addact_cwd", "addact_mode", "cfg_project", "shell_project"):
             ctx.user_data.pop(k, None)
         await on_callback(update, ctx)
         return ConversationHandler.END
@@ -1305,6 +1353,19 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(add_conv)
     app.add_handler(action_add_conv)
+    proj_shell_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(proj_shell_start, pattern=r"^proj:shell:")],
+        states={
+            PROJ_SHELL_CMD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, proj_shell_run),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", proj_shell_cancel),
+            CallbackQueryHandler(_wizard_escape),
+        ],
+    )
+    app.add_handler(proj_shell_conv)
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_error_handler(on_error)
 
