@@ -27,6 +27,7 @@ from .db import DB
 from .files import FileManager, PathEscapeError
 from .runner import make_runner
 from .shell import ShellRunner
+from .trading import register_trading
 
 logger = logging.getLogger(__name__)
 
@@ -93,11 +94,12 @@ async def _send_text_or_file(update: Update, text: str, filename: str,
 
 # callback_data uses ":" as separator — project names with ":" would break parsing.
 # In practice names are alphanum/_/- so we accept that limitation.
-def _main_menu_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📂 Projets", callback_data="menu:projects")],
-        [InlineKeyboardButton("❓ Aide", callback_data="menu:help")],
-    ])
+def _main_menu_markup(trading_enabled: bool = False) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("📂 Projets", callback_data="menu:projects")]]
+    if trading_enabled:
+        rows.append([InlineKeyboardButton("📈 Trading", callback_data="trd:home")])
+    rows.append([InlineKeyboardButton("❓ Aide", callback_data="menu:help")])
+    return InlineKeyboardMarkup(rows)
 
 
 def _projects_list_markup(projects: list[dict], statuses: dict[str, bool]) -> InlineKeyboardMarkup:
@@ -143,6 +145,7 @@ def build_app(cfg: Config) -> Application:
     files_mgr = FileManager(cfg.data_dir / "backups")
     shell = ShellRunner(timeout=cfg.shell_timeout)
     auth = restricted(cfg.allowed_user_ids)
+    trading_enabled = bool(cfg.trading and cfg.trading.enabled)
 
     # ─── /help ────────────────────────────────────────────────────────────
     @auth
@@ -155,7 +158,7 @@ def build_app(cfg: Config) -> Application:
         await update.message.reply_text(
             "*Menu principal*\nChoisis une action :",
             parse_mode=ParseMode.MARKDOWN,
-            reply_markup=_main_menu_markup(),
+            reply_markup=_main_menu_markup(trading_enabled),
         )
 
     async def _project_card_text(name: str) -> tuple[str, bool] | None:
@@ -214,7 +217,7 @@ def build_app(cfg: Config) -> Application:
                 await query.edit_message_text(
                     "*Menu principal*\nChoisis une action :",
                     parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=_main_menu_markup(),
+                    reply_markup=_main_menu_markup(trading_enabled),
                 )
             elif target == "projects":
                 await _render_projects_list(query)
@@ -698,4 +701,8 @@ def build_app(cfg: Config) -> Application:
         ])
 
     app.post_init = post_init
+
+    # Wire the optional trading module — no-op if [trading] is missing/disabled.
+    register_trading(app, cfg)
+
     return app

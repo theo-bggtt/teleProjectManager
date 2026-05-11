@@ -1,0 +1,31 @@
+"""Trading domain: on-chain wallet activity monitoring + MC alerts.
+
+Single integration point with the bot: ``register_trading(app, cfg)``.
+"""
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from telegram.ext import Application
+    from ..config import Config
+
+logger = logging.getLogger(__name__)
+
+
+def register_trading(app: "Application", cfg: "Config") -> None:
+    """Wire trading handlers + monitor into the Telegram Application.
+
+    No-op when ``cfg.trading`` is missing or disabled — keeping the bot
+    100% functional without any trading API keys configured.
+    """
+    if cfg.trading is None or not cfg.trading.enabled:
+        logger.debug("Trading module disabled (no [trading] config or enabled=false).")
+        return
+
+    from .handlers import register_handlers  # local import: trading deps optional
+
+    register_handlers(app, cfg)
+    logger.info("Trading module registered (chains: sol + %s).",
+                ", ".join(cfg.trading.evm_chains))
