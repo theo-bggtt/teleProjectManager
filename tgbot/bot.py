@@ -78,7 +78,7 @@ To upload: send a document with caption `/put <name> <path>`
 `/alert <token> <chain> <mc> [--above|--below] [--persistent]` — MC alert
 `/alerts` — list alerts
 `/unalert <id>` — delete alert
-`/holdings <wallet> <chain>` — snapshot positions (coming soon)
+`/holdings <wallet> <chain>` — snapshot positions + total USD
 
 `/cancel` exits /config flow."""
 

@@ -15,6 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
+import aiohttp
 import websockets
 from websockets.exceptions import ConnectionClosed
 
@@ -24,6 +25,109 @@ logger = logging.getLogger(__name__)
 
 HELIUS_ATLAS_WSS = "wss://atlas-mainnet.helius-rpc.com/?api-key={key}"
 HELIUS_RPC_HTTP = "https://mainnet.helius-rpc.com/?api-key={key}"
+
+
+@dataclass
+class Holding:
+    """One position held by a wallet."""
+    symbol: str
+    name: str
+    mint_or_address: str
+    amount: float
+    price_usd: Optional[float]
+    value_usd: Optional[float]
+
+
+async def fetch_solana_holdings(
+    api_key: str, owner: str, limit: int = 100
+) -> tuple[list[Holding], Optional[float]]:
+    """Return (fungible_holdings, native_sol_value_usd) for a Solana wallet.
+
+    Uses Helius DAS ``getAssetsByOwner`` with ``showFungible`` and
+    ``showNativeBalance``. Prices come straight from Helius's price feed.
+    """
+    url = HELIUS_RPC_HTTP.format(key=api_key)
+    body = {
+        "jsonrpc": "2.0",
+        "id": "holdings",
+        "method": "getAssetsByOwner",
+        "params": {
+            "ownerAddress": owner,
+            "page": 1,
+            "limit": limit,
+            "displayOptions": {
+                "showFungible": True,
+                "showNativeBalance": True,
+            },
+        },
+    }
+    timeout = aiohttp.ClientTimeout(total=15)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=body) as resp:
+            resp.raise_for_status()
+            payload = await resp.json()
+    result = payload.get("result") or {}
+    items = result.get("items") or []
+
+    holdings: list[Holding] = []
+    for item in items:
+        if item.get("interface") not in ("FungibleToken", "FungibleAsset"):
+            continue
+        ti = item.get("token_info") or {}
+        balance_raw = ti.get("balance")
+        decimals = ti.get("decimals") or 0
+        try:
+            amount = float(balance_raw) / (10 ** int(decimals)) if balance_raw is not None else 0.0
+        except (TypeError, ValueError):
+            amount = 0.0
+        if amount <= 0:
+            continue
+        pi = ti.get("price_info") or {}
+        price = pi.get("price_per_token")
+        total = pi.get("total_price")
+        try:
+            price = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            price = None
+        try:
+            value = float(total) if total is not None else (
+                price * amount if price is not None else None
+            )
+        except (TypeError, ValueError):
+            value = None
+        content = item.get("content") or {}
+        meta = (content.get("metadata") or {})
+        symbol = meta.get("symbol") or ti.get("symbol") or "?"
+        name = meta.get("name") or ti.get("name") or "?"
+        holdings.append(Holding(
+            symbol=symbol,
+            name=name,
+            mint_or_address=item.get("id") or "?",
+            amount=amount,
+            price_usd=price,
+            value_usd=value,
+        ))
+    holdings.sort(key=lambda h: (h.value_usd or 0), reverse=True)
+
+    native = result.get("nativeBalance") or {}
+    try:
+        native_value = float(native.get("total_price")) if native.get("total_price") is not None else None
+    except (TypeError, ValueError):
+        native_value = None
+    try:
+        native_price = float(native.get("price_per_sol")) if native.get("price_per_sol") is not None else None
+    except (TypeError, ValueError):
+        native_price = None
+    try:
+        lamports = float(native.get("lamports") or 0)
+        native_amount = lamports / 1e9
+    except (TypeError, ValueError):
+        native_amount = 0.0
+    holdings.insert(0, Holding(
+        symbol="SOL", name="Native SOL", mint_or_address="native",
+        amount=native_amount, price_usd=native_price, value_usd=native_value,
+    ))
+    return holdings, native_value
 
 
 @dataclass

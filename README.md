@@ -14,6 +14,11 @@ anything that has a "start command") on your Raspberry Pi or WSL dev machine.
   (caption `/put name path`) to upload. Previous versions are automatically backed up.
 - **Shell access**: `/shell <project> <command>` runs anything in the project's
   directory. Output (or output-as-document, if large) comes back.
+- **Actions** — save named one-click commands separate from projects (a Docker
+  compose, a `git pull`, a Python script, a long-running watcher, …). Each
+  action has a name, a command, an optional working directory, a mode
+  (`oneshot` for fire-and-forget, `managed` for start/stop/logs like projects)
+  and an optional `require_confirm` flag for destructive operations.
 - **Locked to a whitelist** of Telegram user IDs.
 
 ## Setup
@@ -113,6 +118,26 @@ journalctl -u tgbot -f
 /shell myapi git pull
 ```
 
+### Actions
+
+```
+/addaction
+  > name:  deploy_prod
+  > cmd:   docker compose -f /srv/app/docker-compose.yml up -d
+  > cwd:   -
+  > mode:  ⚡ Oneshot
+  > confirm? Oui
+/actions                  # list
+/runaction deploy_prod    # triggers the confirm prompt, then runs
+/delaction deploy_prod    # delete
+```
+
+From `/start`, the inline menu now offers **🚀 Actions** next to **📂 Projets**.
+Managed actions reuse the same tmux/Windows runner that drives projects, so they
+survive bot restarts and expose `▶️ Start / ⏹ Stop / 🔄 Restart / 📄 Logs`
+buttons. Oneshot actions return the captured stdout + exit code right in chat
+(or as a `.txt` attachment when long).
+
 ## Layout
 
 ```
@@ -135,9 +160,10 @@ tgpm/
 After running you'll also see:
 ```
 data/
-├── projects.db        # SQLite — project list + config
+├── projects.db        # SQLite — projects + actions
 ├── logs/              # tmux pipe-pane captures
-│   └── <project>.log
+│   ├── <project>.log
+│   └── action_<name>.log   # for managed actions
 └── backups/           # File backups before /put overwrites
     └── <project>/
         └── <ts>_<safe_name>

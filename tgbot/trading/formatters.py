@@ -140,6 +140,39 @@ def transfer_message(
     )
 
 
+# ── holdings ───────────────────────────────────────────────────────────
+def holdings_message(
+    chain: str,
+    wallet: str,
+    holdings: list,                  # list[Holding]
+    total_usd: Optional[float],
+    max_rows: int = 15,
+) -> str:
+    if not holdings:
+        return (
+            f"📭 *{chain.upper()}* — `{_short_addr(wallet)}`\n"
+            f"No fungible tokens found."
+        )
+    lines = [
+        f"💰 *Holdings* — *{chain.upper()}*",
+        f"[{_short_addr(wallet)}]({_wallet_explorer_url(chain, wallet)})",
+        "",
+    ]
+    top = holdings[:max_rows]
+    rest = holdings[max_rows:]
+    for h in top:
+        value = f"${h.value_usd:,.2f}" if h.value_usd is not None else "—"
+        amt = f"{h.amount:,.4f}"
+        lines.append(f"`{h.symbol:>6}` {amt} — {value}")
+    if rest:
+        rest_value = sum((h.value_usd or 0) for h in rest)
+        lines.append(f"… {len(rest)} more (≈${rest_value:,.2f})")
+    if total_usd is not None:
+        lines.append("")
+        lines.append(f"*Total: ${total_usd:,.2f}*")
+    return "\n".join(lines)
+
+
 # ── MC alert ───────────────────────────────────────────────────────────
 def mc_alert_message(
     alert_id: int,

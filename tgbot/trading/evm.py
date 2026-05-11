@@ -16,11 +16,13 @@ import json
 import logging
 from typing import Optional
 
+import aiohttp
 import websockets
 from websockets.exceptions import ConnectionClosed
 
 from .db import TradingDB
-from .solana import EventSink, WalletEvent
+from .prices import PriceClient
+from .solana import EventSink, Holding, WalletEvent
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,127 @@ def alchemy_wss_url(chain: str, api_key: str) -> str:
     if net is None:
         raise ValueError(f"Unsupported EVM chain {chain!r}")
     return f"wss://{net}.g.alchemy.com/v2/{api_key}"
+
+
+def alchemy_http_url(chain: str, api_key: str) -> str:
+    net = _ALCHEMY_NETS.get(chain)
+    if net is None:
+        raise ValueError(f"Unsupported EVM chain {chain!r}")
+    return f"https://{net}.g.alchemy.com/v2/{api_key}"
+
+
+_NATIVE_SYMBOLS = {"eth": "ETH", "base": "ETH", "bsc": "BNB"}
+
+
+async def fetch_evm_holdings(
+    chain: str, api_key: str, owner: str,
+    price_client: Optional[PriceClient] = None,
+    max_tokens: int = 50,
+) -> tuple[list[Holding], Optional[float]]:
+    """Return (token_holdings, native_value_usd) for an EVM wallet.
+
+    Uses Alchemy's ``alchemy_getTokenBalances`` (defaults to ERC20 tokens
+    with a non-zero balance) and ``alchemy_getTokenMetadata`` per token.
+    Native balance comes from ``eth_getBalance``. Prices are best-effort
+    via Dexscreener — many long-tail tokens will show no price.
+    """
+    url = alchemy_http_url(chain, api_key)
+    timeout = aiohttp.ClientTimeout(total=20)
+    native_symbol = _NATIVE_SYMBOLS.get(chain, "ETH")
+    holdings: list[Holding] = []
+    native_value_usd: Optional[float] = None
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        # 1. Native balance
+        balances_req = {
+            "jsonrpc": "2.0", "id": 1, "method": "eth_getBalance",
+            "params": [owner, "latest"],
+        }
+        async with session.post(url, json=balances_req) as resp:
+            resp.raise_for_status()
+            native_payload = await resp.json()
+        try:
+            native_wei = int(native_payload.get("result", "0x0"), 16)
+            native_amount = native_wei / 1e18
+        except (TypeError, ValueError):
+            native_amount = 0.0
+
+        # 2. ERC20 balances
+        tok_req = {
+            "jsonrpc": "2.0", "id": 2, "method": "alchemy_getTokenBalances",
+            "params": [owner, "erc20"],
+        }
+        async with session.post(url, json=tok_req) as resp:
+            resp.raise_for_status()
+            tok_payload = await resp.json()
+        token_balances = ((tok_payload.get("result") or {}).get("tokenBalances") or [])
+        non_zero = []
+        for tb in token_balances:
+            raw = tb.get("tokenBalance")
+            if not raw or raw == "0x" or int(raw, 16) == 0:
+                continue
+            non_zero.append((tb["contractAddress"], int(raw, 16)))
+        non_zero = non_zero[:max_tokens]
+
+        # 3. Metadata + price per token (sequential to stay simple; caller
+        # uses /holdings interactively so latency is acceptable).
+        for addr, raw_balance in non_zero:
+            meta_req = {
+                "jsonrpc": "2.0", "id": 3, "method": "alchemy_getTokenMetadata",
+                "params": [addr],
+            }
+            try:
+                async with session.post(url, json=meta_req) as resp:
+                    resp.raise_for_status()
+                    meta_payload = await resp.json()
+            except aiohttp.ClientError:
+                continue
+            meta = meta_payload.get("result") or {}
+            decimals = meta.get("decimals")
+            if decimals is None:
+                continue
+            try:
+                amount = raw_balance / (10 ** int(decimals))
+            except (TypeError, ValueError):
+                continue
+            if amount <= 0:
+                continue
+            symbol = meta.get("symbol") or "?"
+            name = meta.get("name") or "?"
+            price = None
+            value = None
+            if price_client is not None:
+                info = await price_client.get_token(addr, chain)
+                if info is not None:
+                    price = info.price_usd
+                    if price is not None:
+                        value = price * amount
+            holdings.append(Holding(
+                symbol=symbol, name=name, mint_or_address=addr,
+                amount=amount, price_usd=price, value_usd=value,
+            ))
+
+        # 4. Native value via wrapped-token Dexscreener price.
+        if native_amount > 0 and price_client is not None:
+            wrapped = {
+                "eth":  "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",  # WETH (Ethereum)
+                "base": "0x4200000000000000000000000000000000000006",  # WETH (Base)
+                "bsc":  "0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c",  # WBNB
+            }.get(chain)
+            if wrapped:
+                info = await price_client.get_token(wrapped, chain)
+                if info is not None and info.price_usd is not None:
+                    native_value_usd = info.price_usd * native_amount
+
+    holdings.sort(key=lambda h: (h.value_usd or 0), reverse=True)
+    # Prepend native as a synthetic "holding" entry too, for clarity.
+    holdings.insert(0, Holding(
+        symbol=native_symbol, name=f"Native {native_symbol}",
+        mint_or_address="native", amount=native_amount,
+        price_usd=(native_value_usd / native_amount) if native_value_usd and native_amount else None,
+        value_usd=native_value_usd,
+    ))
+    return holdings, native_value_usd
 
 
 class EvmMonitor:

@@ -270,9 +270,60 @@ def register_handlers(
             f"Deleted alert #{aid}." if ok else f"No alert #{aid}."
         )
 
+    # ── /holdings <wallet> <chain> ─────────────────────────────────────
+    @auth
+    async def cmd_holdings(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if len(ctx.args) < 2:
+            await update.message.reply_text(
+                "Usage: `/holdings <wallet_address> <chain>`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        wallet = ctx.args[0]
+        chain = ctx.args[1].lower()
+        if chain not in SUPPORTED_CHAINS:
+            await update.message.reply_text(
+                f"Unknown chain `{chain}`.", parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        if not validate_address(wallet, chain):
+            await update.message.reply_text(
+                f"Invalid {chain.upper()} address.", parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        norm = _normalize_address(wallet, chain)
+        await update.message.reply_text("⏳ Fetching holdings…")
+        try:
+            if chain == "sol":
+                from .solana import fetch_solana_holdings
+                holdings, _ = await fetch_solana_holdings(
+                    monitor.helius_api_key, norm
+                )
+            else:
+                from .evm import fetch_evm_holdings
+                holdings, native_value = await fetch_evm_holdings(
+                    chain, monitor.alchemy_api_key, norm,
+                    price_client=monitor.price_client,
+                )
+        except Exception as e:
+            logger.exception("holdings fetch failed")
+            await update.message.reply_text(
+                f"Error fetching holdings: `{type(e).__name__}: {e}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+
+        total = sum((h.value_usd or 0) for h in holdings) or None
+        from .formatters import holdings_message
+        text = holdings_message(chain, norm, holdings, total)
+        await update.message.reply_text(
+            text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True,
+        )
+
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))
     app.add_handler(CommandHandler("wallets", cmd_wallets))
     app.add_handler(CommandHandler("alert", cmd_alert))
     app.add_handler(CommandHandler("alerts", cmd_alerts))
     app.add_handler(CommandHandler("unalert", cmd_unalert))
+    app.add_handler(CommandHandler("holdings", cmd_holdings))

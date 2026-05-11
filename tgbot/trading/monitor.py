@@ -104,6 +104,21 @@ class TradingMonitor:
         await self._prices.close()
         logger.info("Trading monitor stopped.")
 
+    # ── REST helpers exposed for handlers ─────────────────────────────
+    @property
+    def price_client(self) -> PriceClient:
+        return self._prices
+
+    @property
+    def helius_api_key(self) -> str:
+        assert self._cfg.trading is not None
+        return self._cfg.trading.helius_api_key
+
+    @property
+    def alchemy_api_key(self) -> str:
+        assert self._cfg.trading is not None
+        return self._cfg.trading.alchemy_api_key
+
     # ── notifications from handlers (wallet add/remove) ───────────────
     def notify_wallets_changed(self, chain: Optional[str] = None) -> None:
         if (chain is None or chain == "sol") and self._solana is not None:
