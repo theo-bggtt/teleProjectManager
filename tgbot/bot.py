@@ -63,6 +63,15 @@ To upload: send a document with caption `/put <name> <path>`
 *Shell*
 `/shell <name> <command...>` — run inside project dir
 
+*Trading* (if enabled)
+`/watch <addr> <chain> [label]` — track a wallet
+`/unwatch <addr> [chain]` — stop tracking
+`/wallets` — list watched wallets
+`/alert <token> <chain> <mc> [--above|--below] [--persistent]` — MC alert
+`/alerts` — list alerts
+`/unalert <id>` — delete alert
+`/holdings <wallet> <chain>` — snapshot positions (coming soon)
+
 `/cancel` exits /config flow."""
 
 
@@ -683,7 +692,7 @@ def build_app(cfg: Config) -> Application:
     app.add_error_handler(on_error)
 
     async def post_init(application):
-        await application.bot.set_my_commands([
+        commands = [
             BotCommand("start", "Menu principal"),
             BotCommand("projects", "List all projects"),
             BotCommand("add", "Add project: <name> <path>"),
@@ -698,7 +707,18 @@ def build_app(cfg: Config) -> Application:
             BotCommand("shell", "Run shell command"),
             BotCommand("remove", "Remove project"),
             BotCommand("help", "Show help"),
-        ])
+        ]
+        if trading_enabled:
+            commands.extend([
+                BotCommand("watch", "Watch wallet: <addr> <chain>"),
+                BotCommand("unwatch", "Unwatch wallet"),
+                BotCommand("wallets", "List watched wallets"),
+                BotCommand("alert", "MC alert: <token> <chain> <mc>"),
+                BotCommand("alerts", "List MC alerts"),
+                BotCommand("unalert", "Delete MC alert"),
+                BotCommand("holdings", "Wallet holdings snapshot"),
+            ])
+        await application.bot.set_my_commands(commands)
 
     app.post_init = post_init
 

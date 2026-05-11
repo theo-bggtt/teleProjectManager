@@ -24,8 +24,11 @@ def register_trading(app: "Application", cfg: "Config") -> None:
         logger.debug("Trading module disabled (no [trading] config or enabled=false).")
         return
 
-    from .handlers import register_handlers  # local import: trading deps optional
+    # Local imports: optional deps (aiohttp/websockets) only loaded when enabled.
+    from .db import TradingDB
+    from .handlers import register_handlers
 
-    register_handlers(app, cfg)
+    db = TradingDB(cfg.data_dir / "trading.db")
+    register_handlers(app, cfg, db)
     logger.info("Trading module registered (chains: sol + %s).",
                 ", ".join(cfg.trading.evm_chains))
