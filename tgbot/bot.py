@@ -1,4 +1,6 @@
 """Telegram bot command handlers."""
+import base64
+import hashlib
 import logging
 from io import BytesIO
 from pathlib import Path
@@ -41,6 +43,7 @@ PROJ_SHELL_CMD = 700
 
 # Telegram message limit is ~4096; leave headroom for markdown fences
 INLINE_TEXT_LIMIT = 3500
+PAGE_SIZE = 10
 
 
 HELP_TEXT = """*Telegram Project Manager*
@@ -225,6 +228,30 @@ def _action_runner_key(name: str) -> str:
     return f"action_{name}"
 
 
+def _files_slug(rel_path: str) -> str:
+    """8-char base32 hash of a relative path, callback_data-safe."""
+    if rel_path in ("", "."):
+        return "_"
+    digest = hashlib.sha1(rel_path.encode("utf-8")).digest()[:5]
+    return base64.b32encode(digest).decode("ascii").rstrip("=").lower()
+
+
+def _files_resolve(ctx: ContextTypes.DEFAULT_TYPE, slug: str) -> str | None:
+    """Return the rel path mapped to slug, or None if expired/unknown."""
+    if slug == "_":
+        return "."
+    mapping = ctx.chat_data.get("files_path_map") or {}
+    return mapping.get(slug)
+
+
+def _files_remember(ctx: ContextTypes.DEFAULT_TYPE, rel_path: str) -> str:
+    """Compute slug for rel_path and store mapping in chat_data."""
+    slug = _files_slug(rel_path)
+    mapping = ctx.chat_data.setdefault("files_path_map", {})
+    mapping[slug] = rel_path
+    return slug
+
+
 def build_app(cfg: Config) -> Application:
     db = DB(cfg.data_dir / "projects.db")
     runner = make_runner(cfg.data_dir / "logs")
@@ -288,6 +315,78 @@ def build_app(cfg: Config) -> Application:
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=_projects_list_markup(projs, statuses),
         )
+
+    async def _render_files(
+        query, ctx: ContextTypes.DEFAULT_TYPE, name: str, rel: str,
+    ) -> None:
+        proj = db.get_project(name)
+        if not proj:
+            await query.answer(text=f"Projet {name} introuvable", show_alert=True)
+            return
+        try:
+            entries = files_mgr.list_dir(proj["path"], rel)
+        except (PathEscapeError, FileNotFoundError, NotADirectoryError) as e:
+            await query.answer(text=str(e), show_alert=True)
+            return
+
+        dirs, files = [], []
+        for e in entries:
+            if e.endswith("/"):
+                dirs.append(e.rstrip("/"))
+            else:
+                files.append(e)
+        dirs.sort()
+        files.sort()
+        items = [(d, True) for d in dirs] + [(f, False) for f in files]
+
+        page_key = f"files_page:{name}:{_files_slug(rel)}"
+        page = ctx.chat_data.get(page_key, 0)
+        total_pages = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = max(0, min(page, total_pages - 1))
+        ctx.chat_data[page_key] = page
+        slice_ = items[page * PAGE_SIZE : (page + 1) * PAGE_SIZE]
+
+        rows: list[list[InlineKeyboardButton]] = []
+        for entry_name, is_dir in slice_:
+            child_rel = f"{rel}/{entry_name}" if rel not in ("", ".") else entry_name
+            child_slug = _files_remember(ctx, child_rel)
+            if is_dir:
+                rows.append([InlineKeyboardButton(
+                    f"📁 {entry_name}/",
+                    callback_data=f"proj:files:{name}:{child_slug}",
+                )])
+            else:
+                rows.append([InlineKeyboardButton(
+                    f"📄 {entry_name}",
+                    callback_data=f"proj:fget:{name}:{child_slug}",
+                )])
+
+        cur_slug = _files_slug(rel)
+        if total_pages > 1:
+            rows.append([
+                InlineKeyboardButton("◀️", callback_data=f"proj:fpg:{name}:{cur_slug}:prev"),
+                InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data="wiz:noop"),
+                InlineKeyboardButton("▶️", callback_data=f"proj:fpg:{name}:{cur_slug}:next"),
+            ])
+
+        if rel not in ("", "."):
+            parent = "/".join(rel.split("/")[:-1]) or "."
+            parent_slug = _files_remember(ctx, parent)
+            rows.append([InlineKeyboardButton(
+                "⬆️ Parent", callback_data=f"proj:files:{name}:{parent_slug}",
+            )])
+
+        rows.append([InlineKeyboardButton("⬅️ Retour", callback_data=f"proj:{name}")])
+
+        text = f"*📁 Fichiers — {name}*\nChemin : `{rel}`"
+        try:
+            await query.edit_message_text(
+                text, parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup(rows),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
 
     # ─── action helpers ──────────────────────────────────────────────────
     async def _format_action_card(action: dict) -> tuple[str, bool]:
