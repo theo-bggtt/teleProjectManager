@@ -32,7 +32,7 @@ from .trading import register_trading
 logger = logging.getLogger(__name__)
 
 # /config conversation states
-CFG_START_CMD, CFG_ENTRY_FILE = range(2)
+CFG_SELECT, CFG_START_CMD, CFG_ENTRY_FILE = range(3)
 # add-project conversation states (from inline button)
 ADD_NAME, ADD_PATH = range(2, 4)
 # add-action conversation states
@@ -948,55 +948,85 @@ def build_app(cfg: Config) -> Application:
     # ─── /config (conversation) ───────────────────────────────────────────
     @auth
     async def cmd_config(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        if not ctx.args:
-            await update.message.reply_text("Usage: `/config <name>`",
-                                             parse_mode=ParseMode.MARKDOWN)
+        if ctx.args:
+            name = ctx.args[0]
+            proj = db.get_project(name)
+            if not proj:
+                await _wizard_step(update, ctx, f"⚠️ Pas de projet `{name}`.")
+                ctx.user_data.pop("cfg_project", None)
+                return ConversationHandler.END
+            ctx.user_data["cfg_project"] = name
+            current = proj.get("start_command") or "(none)"
+            await _wizard_step(
+                update, ctx,
+                f"⚙️ Configurer *{name}*\n\nCommande actuelle : `{current}`\n\n💻 Envoie la commande de démarrage.",
+            )
+            return CFG_START_CMD
+        projects = db.list_projects()
+        if not projects:
+            await _wizard_step(update, ctx, "Aucun projet. Crée-en un d'abord via *📂 Projets*.")
             return ConversationHandler.END
-        name = ctx.args[0]
+        rows = [[InlineKeyboardButton(p["name"], callback_data=f"cfgsel:{p['name']}")] for p in projects]
+        await _wizard_step(update, ctx, "⚙️ Sélectionne un projet à configurer.", extra_rows=rows)
+        return CFG_SELECT
+
+    async def cfg_select(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        parts = (query.data or "").split(":", 1)
+        if len(parts) != 2:
+            return CFG_SELECT
+        name = parts[1]
         proj = db.get_project(name)
         if not proj:
-            await update.message.reply_text(f"No project `{name}`.",
-                                             parse_mode=ParseMode.MARKDOWN)
+            await _wizard_step(update, ctx, f"⚠️ Pas de projet `{name}`.")
             return ConversationHandler.END
         ctx.user_data["cfg_project"] = name
         current = proj.get("start_command") or "(none)"
-        await update.message.reply_text(
-            f"Configuring *{name}*.\n\n"
-            f"Current start command: `{current}`\n\n"
-            f"Send the new start command (e.g. `python main.py` or `npm run dev`), "
-            f"or `/cancel`.",
-            parse_mode=ParseMode.MARKDOWN,
+        await _wizard_step(
+            update, ctx,
+            f"⚙️ Configurer *{name}*\n\nCommande actuelle : `{current}`\n\n💻 Envoie la commande de démarrage.",
         )
         return CFG_START_CMD
 
     async def cfg_start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        name = ctx.user_data["cfg_project"]
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        name = ctx.user_data.get("cfg_project")
+        if not name:
+            await _wizard_step(update, ctx, "⚠️ État perdu, recommence depuis le menu.")
+            return ConversationHandler.END
         cmd = update.message.text.strip()
         db.update_project(name, start_command=cmd)
         proj = db.get_project(name)
         current = proj.get("entry_file") or "(none)"
-        await update.message.reply_text(
-            f"Saved start command. Now the entry file (just for reference / display). "
-            f"Current: `{current}`\n\nSend a filename or `skip`.",
-            parse_mode=ParseMode.MARKDOWN,
+        await _wizard_step(
+            update, ctx,
+            f"✅ Commande enregistrée pour *{name}*.\n\n"
+            f"📄 Fichier de log d'entrée (actuel : `{current}`) ?\n"
+            f"Envoie un nom de fichier ou `skip`.",
         )
         return CFG_ENTRY_FILE
 
     async def cfg_entry_file(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        name = ctx.user_data["cfg_project"]
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        name = ctx.user_data.get("cfg_project")
+        if not name:
+            await _wizard_step(update, ctx, "⚠️ État perdu, recommence depuis le menu.")
+            return ConversationHandler.END
         text = update.message.text.strip()
         if text.lower() != "skip":
             db.update_project(name, entry_file=text)
-        await update.message.reply_text(
-            f"✅ Configured *{name}*. Use `/run {name}` to start.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        await _send_main_menu(update)
+        await _wizard_finish(update, ctx)
         return ConversationHandler.END
 
     async def cfg_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        await update.message.reply_text("Cancelled.")
-        await _send_main_menu(update)
+        await _wizard_finish(update, ctx)
         return ConversationHandler.END
 
     # ─── /run /stop /restart /status ──────────────────────────────────────
@@ -1204,6 +1234,7 @@ def build_app(cfg: Config) -> Application:
     config_conv = ConversationHandler(
         entry_points=[CommandHandler("config", cmd_config)],
         states={
+            CFG_SELECT: [CallbackQueryHandler(cfg_select, pattern=r"^cfgsel:")],
             CFG_START_CMD: [MessageHandler(filters.TEXT & ~filters.COMMAND, cfg_start_cmd)],
             CFG_ENTRY_FILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, cfg_entry_file)],
         },
