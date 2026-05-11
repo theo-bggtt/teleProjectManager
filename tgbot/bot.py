@@ -146,7 +146,14 @@ def _project_actions_markup(name: str, running: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📄 Logs", callback_data=f"act:logs:{name}"),
             InlineKeyboardButton("ℹ️ Status", callback_data=f"act:status:{name}"),
         ],
-        [InlineKeyboardButton("⬅️ Retour", callback_data="menu:projects")],
+        [
+            InlineKeyboardButton("⚙️ Config", callback_data=f"proj:cfg:{name}"),
+            InlineKeyboardButton("📁 Fichiers", callback_data=f"proj:files:{name}"),
+        ],
+        [
+            InlineKeyboardButton("💻 Shell", callback_data=f"proj:shell:{name}"),
+            InlineKeyboardButton("⬅️ Retour", callback_data="menu:projects"),
+        ],
     ])
 
 
