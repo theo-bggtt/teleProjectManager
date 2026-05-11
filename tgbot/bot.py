@@ -481,6 +481,12 @@ def build_app(cfg: Config) -> Application:
         query = update.callback_query
         await query.answer()
         data = query.data or ""
+
+        if data == "wiz:cancel":
+            await update.callback_query.answer()
+            await _wizard_finish(update, ctx)
+            return
+
         parts = data.split(":", 2)
         ns = parts[0] if parts else ""
 
@@ -1198,13 +1204,26 @@ def build_app(cfg: Config) -> Application:
     # ─── build Application ────────────────────────────────────────────────
     app = Application.builder().token(cfg.bot_token).build()
 
+    async def _wizard_escape(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        """Fallback when user clicks a non-wizard button (e.g. main menu) during a wizard.
+        Cleans state and lets on_callback handle the navigation by editing the same message."""
+        ctx.user_data.pop("wizard_msg_id", None)
+        ctx.user_data.pop("wizard_chat_id", None)
+        for k in ("add_name", "addact_name", "addact_command", "addact_cwd", "addact_mode", "cfg_project"):
+            ctx.user_data.pop(k, None)
+        await on_callback(update, ctx)
+        return ConversationHandler.END
+
     config_conv = ConversationHandler(
         entry_points=[CommandHandler("config", cmd_config)],
         states={
             CFG_START_CMD: [MessageHandler(filters.TEXT & ~filters.COMMAND, cfg_start_cmd)],
             CFG_ENTRY_FILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, cfg_entry_file)],
         },
-        fallbacks=[CommandHandler("cancel", cfg_cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cfg_cancel),
+            CallbackQueryHandler(_wizard_escape),
+        ],
         conversation_timeout=300,
     )
 
@@ -1214,7 +1233,10 @@ def build_app(cfg: Config) -> Application:
             ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_name)],
             ADD_PATH: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_path)],
         },
-        fallbacks=[CommandHandler("cancel", cfg_cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cfg_cancel),
+            CallbackQueryHandler(_wizard_escape),
+        ],
         conversation_timeout=300,
     )
 
@@ -1230,7 +1252,10 @@ def build_app(cfg: Config) -> Application:
             ADD_A_MODE: [CallbackQueryHandler(action_add_mode, pattern=r"^addact:mode:")],
             ADD_A_CONFIRM: [CallbackQueryHandler(action_add_confirm, pattern=r"^addact:cfm:")],
         },
-        fallbacks=[CommandHandler("cancel", action_add_cancel)],
+        fallbacks=[
+            CommandHandler("cancel", action_add_cancel),
+            CallbackQueryHandler(_wizard_escape),
+        ],
         conversation_timeout=300,
     )
 
