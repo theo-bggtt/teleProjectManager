@@ -1,0 +1,17 @@
+# Telegram bot token from @BotFather
+bot_token = "PASTE_YOUR_BOT_TOKEN_HERE"
+
+# Telegram user IDs allowed to use this bot.
+# Get your ID by messaging @userinfobot. Only these users can do ANYTHING.
+allowed_user_ids = [123456789]
+
+# Where SQLite, logs, and file backups go. Relative paths are resolved
+# from the working directory the bot is launched from.
+data_dir = "./data"
+
+# Max duration for /shell commands (seconds). Long-running tasks should be
+# configured as a project and started with /run instead.
+shell_timeout = 30
+
+# Default number of log lines /logs returns when no count is given.
+default_log_lines = 50

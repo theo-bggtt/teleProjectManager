@@ -1,0 +1,19 @@
+[Unit]
+Description=Telegram Project Manager Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust user + paths to your install
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/tgpm
+ExecStart=/home/pi/tgpm/.venv/bin/python -m tgbot config.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
