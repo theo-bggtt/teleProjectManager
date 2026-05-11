@@ -326,11 +326,14 @@ def register_handlers(
         return InlineKeyboardMarkup([
             [InlineKeyboardButton("👛 Wallets surveillés", callback_data="trd:wallets")],
             [InlineKeyboardButton("🔔 Alertes MC", callback_data="trd:alerts")],
+            [InlineKeyboardButton("💰 Holdings", callback_data="trd:hold")],
             [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
         ])
 
     def _wallets_markup(wallets: list[dict]) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = []
+        rows: list[list[InlineKeyboardButton]] = [
+            [InlineKeyboardButton("➕ Ajouter wallet", callback_data="trd:wadd")],
+        ]
         for w in wallets:
             tag = f" — {w['label']}" if w["label"] else ""
             short = f"{w['address'][:4]}…{w['address'][-4:]}"
@@ -347,7 +350,9 @@ def register_handlers(
         return InlineKeyboardMarkup(rows)
 
     def _alerts_markup(alerts: list[dict]) -> InlineKeyboardMarkup:
-        rows: list[list[InlineKeyboardButton]] = []
+        rows: list[list[InlineKeyboardButton]] = [
+            [InlineKeyboardButton("➕ Créer alerte", callback_data="trd:aadd")],
+        ]
         for a in alerts:
             arrow = "≥" if a["direction"] == "above" else "≤"
             state = "🟢" if a["armed"] else "⚫"
