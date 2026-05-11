@@ -211,23 +211,6 @@ def _action_confirm_markup(verb: str, name: str) -> InlineKeyboardMarkup:
     ])
 
 
-def _action_mode_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("⚡ Oneshot", callback_data="addact:mode:oneshot"),
-            InlineKeyboardButton("🔁 Managed", callback_data="addact:mode:managed"),
-        ],
-    ])
-
-
-def _action_yesno_markup() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Oui", callback_data="addact:cfm:yes"),
-            InlineKeyboardButton("Non", callback_data="addact:cfm:no"),
-        ],
-    ])
-
 
 def _action_runner_key(name: str) -> str:
     """Prefix action names when handed to the runner so they don't collide with projects."""
@@ -351,14 +334,6 @@ def build_app(cfg: Config) -> Application:
             text,
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=_actions_list_markup(actions, statuses),
-        )
-
-    async def _send_main_menu(update: Update) -> None:
-        """Send the main menu inline keyboard as a follow-up message."""
-        await update.effective_message.reply_text(
-            "*Menu principal*\nChoisis une action :",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=_main_menu_markup(trading_enabled),
         )
 
     def _wizard_markup(extra_rows: list[list[InlineKeyboardButton]] | None = None) -> InlineKeyboardMarkup:
