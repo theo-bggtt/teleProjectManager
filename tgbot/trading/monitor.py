@@ -1,8 +1,7 @@
 """Trading domain orchestrator.
 
 Owns the long-lived asyncio tasks (WSS sessions per chain, MC alert
-polling — wired progressively in later steps) and a single ``dispatch``
-funnel that:
+polling) and a single ``dispatch`` funnel that:
  1. dedups via ``seen_tx``;
  2. formats the event for Telegram;
  3. fans out to every ``allowed_user_ids`` chat.
@@ -11,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Optional
 
 from telegram.constants import ParseMode
@@ -54,6 +54,9 @@ class TradingMonitor:
             if cfg.trading.helius_api_key
             else None
         )
+        self._mc_alert_task: Optional[asyncio.Task] = None
+        self._stop_event = asyncio.Event()
+        self._mc_poll_interval = int(cfg.trading.mc_poll_interval)
         self._evms: dict[str, EvmMonitor] = {}
         if cfg.trading.alchemy_api_key:
             for chain in cfg.trading.evm_chains:
@@ -76,10 +79,24 @@ class TradingMonitor:
         for chain, mon in self._evms.items():
             await mon.start()
             chains.append(chain)
-        # MC alert loop is added in step 7.
-        logger.info("Trading monitor started (%s).", ", ".join(chains) or "no chains")
+        self._mc_alert_task = asyncio.create_task(
+            self._mc_alert_loop(), name="mc-alert-loop"
+        )
+        logger.info(
+            "Trading monitor started (%s; MC poll every %ds).",
+            ", ".join(chains) or "no chains",
+            self._mc_poll_interval,
+        )
 
     async def stop(self) -> None:
+        self._stop_event.set()
+        if self._mc_alert_task is not None:
+            try:
+                await asyncio.wait_for(self._mc_alert_task, timeout=5)
+            except asyncio.TimeoutError:
+                self._mc_alert_task.cancel()
+            finally:
+                self._mc_alert_task = None
         if self._solana is not None:
             await self._solana.stop()
         for mon in self._evms.values():
@@ -135,6 +152,73 @@ class TradingMonitor:
             wallet_label=event.wallet_label,
             sig_or_hash=event.sig_or_hash,
         )
+
+    # ── MC alert polling ─────────────────────────────────────────────
+    async def _mc_alert_loop(self) -> None:
+        """Periodically poll Dexscreener for every armed alert and fire crossings."""
+        while not self._stop_event.is_set():
+            try:
+                await self._mc_alert_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("MC alert tick crashed")
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=self._mc_poll_interval
+                )
+            except asyncio.TimeoutError:
+                pass
+
+    async def _mc_alert_tick(self) -> None:
+        alerts = self._db.list_alerts(armed_only=True)
+        if not alerts:
+            return
+        for alert in alerts:
+            info = await self._prices.get_token(alert["token_address"], alert["chain"])
+            if info is None or info.mc_usd is None:
+                continue
+            crossed = (
+                (alert["direction"] == "above" and info.mc_usd >= alert["mc_target"])
+                or (alert["direction"] == "below" and info.mc_usd <= alert["mc_target"])
+            )
+            if not crossed:
+                continue
+            if not self._is_cooldown_clear(alert):
+                continue
+            await self._fire_alert(alert, info.mc_usd, info.symbol, info.pair_url)
+
+    @staticmethod
+    def _is_cooldown_clear(alert: dict) -> bool:
+        last = alert.get("last_triggered_at")
+        if not last:
+            return True
+        try:
+            # SQLite CURRENT_TIMESTAMP is "YYYY-MM-DD HH:MM:SS" in UTC.
+            last_dt = datetime.fromisoformat(str(last)).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return True
+        cooldown_s = int(alert.get("cooldown_min", 60)) * 60
+        return (datetime.now(timezone.utc) - last_dt).total_seconds() >= cooldown_s
+
+    async def _fire_alert(
+        self, alert: dict, mc_current: float, symbol: str, pair_url: Optional[str]
+    ) -> None:
+        persistent = bool(alert["persistent"])
+        self._db.mark_alert_triggered(alert["id"], disarm=not persistent)
+        text = formatters.mc_alert_message(
+            alert_id=alert["id"],
+            chain=alert["chain"],
+            token_symbol=symbol or "?",
+            token_address=alert["token_address"],
+            direction=alert["direction"],
+            mc_target=alert["mc_target"],
+            mc_current=mc_current,
+            pair_url=pair_url,
+            label=alert.get("label"),
+            persistent=persistent,
+        )
+        await self._fanout(text)
 
     async def _fanout(self, text: str) -> None:
         for chat_id in self._chat_ids:
