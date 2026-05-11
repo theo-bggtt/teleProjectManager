@@ -695,85 +695,106 @@ def build_app(cfg: Config) -> Application:
     @auth
     async def action_add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.callback_query is not None:
-            query = update.callback_query
-            await query.answer()
-            await query.edit_message_text(
-                "*Nouvelle action*\nEnvoie un nom court (ou /cancel).",
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        else:
-            await update.message.reply_text(
-                "*Nouvelle action*\nEnvoie un nom court (ou /cancel).",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await update.callback_query.answer()
+        await _wizard_step(update, ctx, "🚀 *Nouvelle action*\n\nEnvoie un nom court (pas d'espace ni de `:`).")
         return ADD_A_NAME
 
     async def action_add_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
         name = update.message.text.strip()
         if not name or ":" in name or " " in name:
-            await update.message.reply_text(
-                "Nom invalide (pas d'espace ni de `:`). Réessaie ou /cancel.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await _wizard_step(update, ctx, "⚠️ Nom invalide (pas d'espace ni de `:`).\n\n🚀 Envoie un nom court.")
             return ADD_A_NAME
         if db.get_action(name):
-            await update.message.reply_text(
-                f"Action `{name}` existe déjà. Choisis un autre nom ou /cancel.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await _wizard_step(update, ctx, f"⚠️ L'action `{name}` existe déjà.\n\n🚀 Choisis un autre nom.")
             return ADD_A_NAME
         ctx.user_data["addact_name"] = name
-        await update.message.reply_text(
-            f"Nom : `{name}`\n"
-            f"Envoie la commande à exécuter (ex : `python script.py`, "
-            f"`docker compose up -d`, `git pull`).",
-            parse_mode=ParseMode.MARKDOWN,
+        await _wizard_step(
+            update, ctx,
+            f"🚀 Action : *{name}*\n\nMode d'exécution ?",
+            extra_rows=[[
+                InlineKeyboardButton("⚡ Oneshot", callback_data="addact:mode:oneshot"),
+                InlineKeyboardButton("🔁 Long-running", callback_data="addact:mode:managed"),
+            ]],
         )
-        return ADD_A_COMMAND
+        return ADD_A_MODE
 
     async def action_add_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
         command = update.message.text.strip()
         if not command:
-            await update.message.reply_text("Commande vide. Réessaie ou /cancel.")
+            await _wizard_step(update, ctx, "⚠️ Commande vide.\n\n💻 Envoie la commande shell à exécuter.")
             return ADD_A_COMMAND
         ctx.user_data["addact_command"] = command
-        await update.message.reply_text(
-            "Dossier de travail (chemin absolu) ou `-` pour utiliser le dossier du bot.",
-            parse_mode=ParseMode.MARKDOWN,
+        await _wizard_step(
+            update, ctx,
+            "📁 Répertoire de travail (optionnel) ?\n\nEnvoie un chemin absolu, ou clique *Passer*.",
+            extra_rows=[[InlineKeyboardButton("⏭️ Passer", callback_data="addact:cwd:skip")]],
         )
         return ADD_A_CWD
 
     async def action_add_cwd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        text = update.message.text.strip()
-        if text == "-" or text == "":
+        cwd = None
+        if update.callback_query is not None:
+            query = update.callback_query
+            await query.answer()
+            if query.data != "addact:cwd:skip":
+                return ADD_A_CWD
             cwd = None
         else:
-            cwd_path = Path(text).expanduser()
-            if not cwd_path.is_dir():
-                await update.message.reply_text(
-                    f"Pas un dossier : `{cwd_path}`. Réessaie ou `-` pour sauter, ou /cancel.",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                return ADD_A_CWD
-            cwd = str(cwd_path.resolve())
-        ctx.user_data["addact_cwd"] = cwd
-        await update.message.reply_text(
-            "Mode d'exécution ?",
-            reply_markup=_action_mode_markup(),
-        )
-        return ADD_A_MODE
+            try:
+                await update.message.delete()
+            except Exception:
+                pass
+            text = update.message.text.strip()
+            if text == "" or text == "-":
+                cwd = None
+            else:
+                cwd_path = Path(text).expanduser()
+                if not cwd_path.is_dir():
+                    await _wizard_step(
+                        update, ctx,
+                        f"⚠️ Pas un dossier : `{cwd_path}`.\n\n📁 Envoie un chemin valide, ou *Passer*.",
+                        extra_rows=[[InlineKeyboardButton("⏭️ Passer", callback_data="addact:cwd:skip")]],
+                    )
+                    return ADD_A_CWD
+                cwd = str(cwd_path.resolve())
+        name = ctx.user_data.get("addact_name")
+        command = ctx.user_data.get("addact_command")
+        mode = ctx.user_data.get("addact_mode", "oneshot")
+        require_confirm = ctx.user_data.get("addact_confirm", False)
+        if not name or not command:
+            await _wizard_step(update, ctx, "⚠️ État perdu, recommence depuis le menu.")
+            ctx.user_data.pop("addact_name", None)
+            ctx.user_data.pop("addact_command", None)
+            ctx.user_data.pop("addact_cwd", None)
+            ctx.user_data.pop("addact_mode", None)
+            ctx.user_data.pop("addact_confirm", None)
+            return ConversationHandler.END
+        db.add_action(name, command, cwd, mode, require_confirm)
+        await _wizard_finish(update, ctx)
+        return ConversationHandler.END
 
     async def action_add_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
         parts = (query.data or "").split(":")
         if len(parts) != 3 or parts[2] not in ("oneshot", "managed"):
-            await query.edit_message_text("Mode invalide.")
-            return ConversationHandler.END
+            return ADD_A_MODE
         ctx.user_data["addact_mode"] = parts[2]
-        await query.edit_message_text(
+        await _wizard_step(
+            update, ctx,
             "Demander une confirmation avant chaque exécution ?",
-            reply_markup=_action_yesno_markup(),
+            extra_rows=[[
+                InlineKeyboardButton("✅ Oui", callback_data="addact:cfm:yes"),
+                InlineKeyboardButton("❌ Non", callback_data="addact:cfm:no"),
+            ]],
         )
         return ADD_A_CONFIRM
 
@@ -782,37 +803,13 @@ def build_app(cfg: Config) -> Application:
         await query.answer()
         parts = (query.data or "").split(":")
         if len(parts) != 3 or parts[2] not in ("yes", "no"):
-            await query.edit_message_text("Choix invalide.")
-            return ConversationHandler.END
-        require_confirm = parts[2] == "yes"
-        name = ctx.user_data.pop("addact_name", None)
-        command = ctx.user_data.pop("addact_command", None)
-        cwd = ctx.user_data.pop("addact_cwd", None)
-        mode = ctx.user_data.pop("addact_mode", "oneshot")
-        if not name or not command:
-            await query.edit_message_text("État perdu, recommence avec /addaction.")
-            return ConversationHandler.END
-        if not db.add_action(name, command, cwd, mode, require_confirm):
-            await query.edit_message_text(
-                f"Action `{name}` existe déjà.", parse_mode=ParseMode.MARKDOWN,
-            )
-            return ConversationHandler.END
-        cwd_disp = cwd or "(héritage du bot)"
-        await query.edit_message_text(
-            f"✅ Action *{name}* créée.\n"
-            f"Mode : `{mode}` — confirmation : `{'oui' if require_confirm else 'non'}`\n"
-            f"Commande : `{command}`\n"
-            f"Dossier : `{cwd_disp}`",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        await _send_main_menu(update)
-        return ConversationHandler.END
+            return ADD_A_CONFIRM
+        ctx.user_data["addact_confirm"] = (parts[2] == "yes")
+        await _wizard_step(update, ctx, "💻 Commande shell à exécuter ?")
+        return ADD_A_COMMAND
 
     async def action_add_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        for k in ("addact_name", "addact_command", "addact_cwd", "addact_mode"):
-            ctx.user_data.pop(k, None)
-        await update.message.reply_text("Cancelled.")
-        await _send_main_menu(update)
+        await _wizard_finish(update, ctx)
         return ConversationHandler.END
 
     # ─── /actions /runaction /delaction ──────────────────────────────────
@@ -1237,10 +1234,13 @@ def build_app(cfg: Config) -> Application:
         ],
         states={
             ADD_A_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, action_add_name)],
-            ADD_A_COMMAND: [MessageHandler(filters.TEXT & ~filters.COMMAND, action_add_command)],
-            ADD_A_CWD: [MessageHandler(filters.TEXT & ~filters.COMMAND, action_add_cwd)],
             ADD_A_MODE: [CallbackQueryHandler(action_add_mode, pattern=r"^addact:mode:")],
             ADD_A_CONFIRM: [CallbackQueryHandler(action_add_confirm, pattern=r"^addact:cfm:")],
+            ADD_A_COMMAND: [MessageHandler(filters.TEXT & ~filters.COMMAND, action_add_command)],
+            ADD_A_CWD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, action_add_cwd),
+                CallbackQueryHandler(action_add_cwd, pattern=r"^addact:cwd:skip$"),
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", action_add_cancel),
