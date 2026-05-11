@@ -353,6 +353,14 @@ def build_app(cfg: Config) -> Application:
             reply_markup=_actions_list_markup(actions, statuses),
         )
 
+    async def _send_main_menu(update: Update) -> None:
+        """Send the main menu inline keyboard as a follow-up message."""
+        await update.effective_message.reply_text(
+            "*Menu principal*\nChoisis une action :",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_main_menu_markup(trading_enabled),
+        )
+
     async def _execute_action(update: Update, query, action: dict) -> None:
         """Run an action — oneshot via shell, managed via runner."""
         name = action["name"]
@@ -605,6 +613,7 @@ def build_app(cfg: Config) -> Application:
             f"Utilise `/config {name}` pour la commande de démarrage.",
             parse_mode=ParseMode.MARKDOWN,
         )
+        await _send_main_menu(update)
         return ConversationHandler.END
 
     # ─── add-action flow (triggered by /addaction or inline button) ──────
@@ -721,12 +730,14 @@ def build_app(cfg: Config) -> Application:
             f"Dossier : `{cwd_disp}`",
             parse_mode=ParseMode.MARKDOWN,
         )
+        await _send_main_menu(update)
         return ConversationHandler.END
 
     async def action_add_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for k in ("addact_name", "addact_command", "addact_cwd", "addact_mode"):
             ctx.user_data.pop(k, None)
         await update.message.reply_text("Cancelled.")
+        await _send_main_menu(update)
         return ConversationHandler.END
 
     # ─── /actions /runaction /delaction ──────────────────────────────────
@@ -908,10 +919,12 @@ def build_app(cfg: Config) -> Application:
             f"✅ Configured *{name}*. Use `/run {name}` to start.",
             parse_mode=ParseMode.MARKDOWN,
         )
+        await _send_main_menu(update)
         return ConversationHandler.END
 
     async def cfg_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Cancelled.")
+        await _send_main_menu(update)
         return ConversationHandler.END
 
     # ─── /run /stop /restart /status ──────────────────────────────────────
