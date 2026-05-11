@@ -1,4 +1,5 @@
 """Entry point: `python -m tgbot [config-path]`."""
+import asyncio
 import logging
 import sys
 from pathlib import Path
@@ -24,6 +25,12 @@ def main():
     cfg = Config.load(config_path)
     app = build_app(cfg)
     logging.info("Bot starting (data_dir=%s)", cfg.data_dir)
+    # Python 3.14 no longer auto-creates an event loop in the main thread,
+    # but python-telegram-bot 21.x's run_polling relies on get_event_loop().
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     app.run_polling(allowed_updates=["message", "callback_query"])
 
 

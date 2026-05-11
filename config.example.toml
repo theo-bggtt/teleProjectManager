@@ -15,3 +15,21 @@ shell_timeout = 30
 
 # Default number of log lines /logs returns when no count is given.
 default_log_lines = 50
+
+# ─────────────────────────────────────────────────────────────────────
+# Optional: trading / on-chain wallet monitoring module.
+#
+# When this section is missing OR enabled = false, the trading commands
+# and menu entry are not registered. The rest of the bot is unaffected.
+#
+# Sign up for free tiers:
+#   - Helius:  https://www.helius.dev (Solana RPC + WSS)
+#   - Alchemy: https://www.alchemy.com (EVM RPC + WSS)
+# Dexscreener (prices / market cap) needs no API key.
+# ─────────────────────────────────────────────────────────────────────
+# [trading]
+# enabled = true
+# helius_api_key  = "PASTE_HELIUS_KEY"
+# alchemy_api_key = "PASTE_ALCHEMY_KEY"
+# mc_poll_interval = 30                 # seconds between MC alert polls
+# evm_chains = ["eth", "base", "bsc"]   # any subset of supported chains

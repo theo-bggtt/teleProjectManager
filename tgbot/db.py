@@ -13,6 +13,15 @@ CREATE TABLE IF NOT EXISTS projects (
     env_vars       TEXT DEFAULT '{}',
     created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS actions (
+    name            TEXT PRIMARY KEY,
+    command         TEXT NOT NULL,
+    cwd             TEXT,
+    mode            TEXT NOT NULL DEFAULT 'oneshot',
+    require_confirm INTEGER NOT NULL DEFAULT 0,
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -63,4 +72,42 @@ class DB:
         values = list(fields.values()) + [name]
         with self._conn() as c:
             cur = c.execute(f"UPDATE projects SET {cols} WHERE name = ?", values)
+            return cur.rowcount > 0
+
+    # ─── actions ─────────────────────────────────────────────────────────
+    def add_action(self, name: str, command: str, cwd: Optional[str],
+                   mode: str, require_confirm: bool) -> bool:
+        try:
+            with self._conn() as c:
+                c.execute(
+                    "INSERT INTO actions (name, command, cwd, mode, require_confirm) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (name, command, cwd, mode, 1 if require_confirm else 0),
+                )
+            return True
+        except sqlite3.IntegrityError:
+            return False
+
+    def remove_action(self, name: str) -> bool:
+        with self._conn() as c:
+            cur = c.execute("DELETE FROM actions WHERE name = ?", (name,))
+            return cur.rowcount > 0
+
+    def get_action(self, name: str) -> Optional[dict]:
+        with self._conn() as c:
+            row = c.execute("SELECT * FROM actions WHERE name = ?", (name,)).fetchone()
+            return dict(row) if row else None
+
+    def list_actions(self) -> list[dict]:
+        with self._conn() as c:
+            rows = c.execute("SELECT * FROM actions ORDER BY name").fetchall()
+            return [dict(r) for r in rows]
+
+    def update_action(self, name: str, **fields) -> bool:
+        if not fields:
+            return False
+        cols = ", ".join(f"{k} = ?" for k in fields)
+        values = list(fields.values()) + [name]
+        with self._conn() as c:
+            cur = c.execute(f"UPDATE actions SET {cols} WHERE name = ?", values)
             return cur.rowcount > 0
