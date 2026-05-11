@@ -971,6 +971,26 @@ def build_app(cfg: Config) -> Application:
         )
         return CFG_START_CMD
 
+    async def proj_cfg_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            return ConversationHandler.END
+        name = parts[2]
+        proj = db.get_project(name)
+        if not proj:
+            await _wizard_step(update, ctx, f"⚠️ Pas de projet `{name}`.")
+            return ConversationHandler.END
+        ctx.user_data["cfg_project"] = name
+        current = proj.get("start_command") or "(none)"
+        await _wizard_step(
+            update, ctx,
+            f"🛠️ Configurer *{name}*\n\nCommande actuelle : `{current}`\n\n"
+            f"💬 Envoie la commande de démarrage.",
+        )
+        return CFG_START_CMD
+
     async def cfg_start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             await update.message.delete()
@@ -1214,7 +1234,10 @@ def build_app(cfg: Config) -> Application:
         return ConversationHandler.END
 
     config_conv = ConversationHandler(
-        entry_points=[CommandHandler("config", cmd_config)],
+        entry_points=[
+            CommandHandler("config", cmd_config),
+            CallbackQueryHandler(proj_cfg_entry, pattern=r"^proj:cfg:"),
+        ],
         states={
             CFG_SELECT: [CallbackQueryHandler(cfg_select, pattern=r"^cfgsel:")],
             CFG_START_CMD: [MessageHandler(filters.TEXT & ~filters.COMMAND, cfg_start_cmd)],
