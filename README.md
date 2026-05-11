@@ -29,30 +29,55 @@ Message [@userinfobot](https://t.me/userinfobot). It replies with your numeric I
 
 ### 3. Install on your machine
 
-Both WSL (dev) and the RPi (prod) need:
+You need:
 - Python 3.11+
-- `tmux`
+- `tmux` (Linux/WSL only — see Windows note below)
+
+#### Ubuntu / Debian / Raspberry Pi OS / WSL
 
 ```bash
-# Debian/Ubuntu/Raspberry Pi OS
 sudo apt update && sudo apt install -y python3 python3-venv tmux
 
-# Clone or copy this directory, then:
-cd tgpm
+# From the repo root:
 python3 -m venv .venv
-.\venv\Scripts\Activate.ps1
+source .venv/bin/activate
 pip install -r requirements.txt
 
 cp config.example.toml config.toml
 # Edit config.toml: paste your bot_token and allowed_user_ids
 ```
 
+#### Windows (PowerShell)
+
+`tmux` does not run natively on Windows. For development you can either:
+- Run the bot inside **WSL** (recommended — follow the Ubuntu steps above), or
+- Run on native Windows for testing, knowing that the tmux-based features
+  (`/run`, `/stop`, `/logs`, persistent sessions) require WSL or Linux.
+
+```powershell
+# Install Python 3.11+ from python.org first, then from the repo root:
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+Copy-Item config.example.toml config.toml
+# Edit config.toml: paste your bot_token and allowed_user_ids
+```
+
 ### 4. Run it
 
+Ubuntu / WSL:
 ```bash
 python -m tgbot
 # or with explicit config path:
 python -m tgbot /path/to/config.toml
+```
+
+Windows (PowerShell):
+```powershell
+python -m tgbot
+# or with explicit config path:
+python -m tgbot C:\path\to\config.toml
 ```
 
 Message your bot `/help` on Telegram.
