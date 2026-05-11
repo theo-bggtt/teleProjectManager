@@ -40,7 +40,7 @@ sudo apt update && sudo apt install -y python3 python3-venv tmux
 # Clone or copy this directory, then:
 cd tgpm
 python3 -m venv .venv
-source .venv/bin/activate
+.\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
 cp config.example.toml config.toml

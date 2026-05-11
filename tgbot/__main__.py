@@ -24,7 +24,7 @@ def main():
     cfg = Config.load(config_path)
     app = build_app(cfg)
     logging.info("Bot starting (data_dir=%s)", cfg.data_dir)
-    app.run_polling(allowed_updates=["message"])
+    app.run_polling(allowed_updates=["message", "callback_query"])
 
 
 if __name__ == "__main__":

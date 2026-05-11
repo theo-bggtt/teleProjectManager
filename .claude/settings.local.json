@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3 C:\\\\Users\\\\Admin\\\\Documents\\\\ubuntu-autosync\\\\teleProjectManager\\\\data\\\\projects.db \"SELECT name, path, start_command FROM projects;\")",
+      "Bash(python -c \"import sqlite3; c=sqlite3.connect\\(r'C:\\\\Users\\\\Admin\\\\Documents\\\\ubuntu-autosync\\\\teleProjectManager\\\\data\\\\projects.db'\\); [print\\(r\\) for r in c.execute\\('SELECT name, path, start_command FROM projects'\\)]\")",
+      "PowerShell(python -c \"import sqlite3; c=sqlite3.connect\\(r'C:\\\\Users\\\\Admin\\\\Documents\\\\ubuntu-autosync\\\\teleProjectManager\\\\data\\\\projects.db'\\); [print\\(r\\) for r in c.execute\\('SELECT name, path, start_command, entry_file FROM projects'\\)]\")",
+      "PowerShell(Remove-Item *)",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -c \"import ast, sys; ast.parse\\(open\\(r'tgbot\\\\bot.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK syntax'\\)\")",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -c \"from tgbot import bot; print\\('import OK'\\); print\\('helpers:', [n for n in dir\\(bot\\) if n.startswith\\('_'\\) and 'markup' in n.lower\\(\\) or 'menu' in n.lower\\(\\)]\\)\")",
+      "PowerShell(.\\\\venv\\\\Scripts\\\\python.exe -c \"from tgbot import bot; print\\('import OK'\\)\")"
+    ]
+  }
+}

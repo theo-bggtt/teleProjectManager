@@ -32,7 +32,10 @@ class TmuxRunner:
         return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace")
 
     async def is_running(self, project: str) -> bool:
-        rc, _, _ = await self._run("tmux", "has-session", "-t", self._session(project))
+        try:
+            rc, _, _ = await self._run("tmux", "has-session", "-t", self._session(project))
+        except FileNotFoundError:
+            return False
         return rc == 0
 
     async def start(self, project: str, command: str, cwd: str,
