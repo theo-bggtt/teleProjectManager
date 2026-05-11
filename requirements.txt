@@ -1,1 +1,4 @@
 python-telegram-bot>=21.0,<22
+# Trading module (optional — only needed when [trading] is enabled):
+aiohttp>=3.9
+websockets>=12.0
