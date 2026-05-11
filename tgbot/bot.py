@@ -649,55 +649,42 @@ def build_app(cfg: Config) -> Application:
     # ─── add-project flow (triggered by inline button menu:add) ──────────
     @auth
     async def add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        query = update.callback_query
-        await query.answer()
-        await query.edit_message_text(
-            "*Nouveau projet*\nEnvoie le nom du projet (ou /cancel).",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        if update.callback_query is not None:
+            await update.callback_query.answer()
+        await _wizard_step(update, ctx, "📂 *Nouveau projet*\n\nEnvoie un nom court (pas d'espace ni de `:`).")
         return ADD_NAME
 
     async def add_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
         name = update.message.text.strip()
         if not name or ":" in name or " " in name:
-            await update.message.reply_text(
-                "Nom invalide (pas d'espace ni de `:`). Réessaie ou /cancel.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await _wizard_step(update, ctx, "⚠️ Nom invalide (pas d'espace ni de `:`).\n\n📂 Envoie un nom court.")
             return ADD_NAME
         if db.get_project(name):
-            await update.message.reply_text(
-                f"Projet `{name}` existe déjà. Choisis un autre nom ou /cancel.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await _wizard_step(update, ctx, f"⚠️ Le projet `{name}` existe déjà.\n\n📂 Choisis un autre nom.")
             return ADD_NAME
         ctx.user_data["add_name"] = name
-        await update.message.reply_text(
-            f"Nom : `{name}`\nEnvoie le chemin absolu du dossier (ou /cancel).",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await _wizard_step(update, ctx, f"📂 Projet : *{name}*\n\n📄 Envoie le chemin absolu du dossier.")
         return ADD_PATH
 
     async def add_path(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
         path_obj = Path(update.message.text.strip()).expanduser().resolve()
         if not path_obj.is_dir():
-            await update.message.reply_text(
-                f"Pas un dossier : `{path_obj}`. Réessaie ou /cancel.",
-                parse_mode=ParseMode.MARKDOWN,
-            )
+            await _wizard_step(update, ctx, f"⚠️ Pas un dossier : `{path_obj}`.\n\n📄 Envoie un chemin valide.")
             return ADD_PATH
-        name = ctx.user_data.pop("add_name")
-        if not db.add_project(name, str(path_obj)):
-            await update.message.reply_text(
-                f"Projet `{name}` existe déjà.", parse_mode=ParseMode.MARKDOWN,
-            )
+        name = ctx.user_data.get("add_name")
+        if not name or not db.add_project(name, str(path_obj)):
+            await _wizard_step(update, ctx, f"⚠️ Échec : projet `{name}` déjà existant ou état perdu.")
+            await _wizard_finish(update, ctx)
             return ConversationHandler.END
-        await update.message.reply_text(
-            f"✅ Ajouté *{name}* → `{path_obj}`\n"
-            f"Utilise `/config {name}` pour la commande de démarrage.",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        await _send_main_menu(update)
+        await _wizard_finish(update, ctx)
         return ConversationHandler.END
 
     # ─── add-action flow (triggered by /addaction or inline button) ──────
