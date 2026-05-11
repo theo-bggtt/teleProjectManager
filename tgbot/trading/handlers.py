@@ -14,9 +14,10 @@ import logging
 import re
 from typing import TYPE_CHECKING
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import CommandHandler, ContextTypes
+from telegram.error import BadRequest
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 from ..auth import restricted
 from .db import TradingDB
@@ -320,6 +321,174 @@ def register_handlers(
             text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True,
         )
 
+    # ── inline UI (callback_data namespace "trd:") ─────────────────────
+    def _home_markup() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("👛 Wallets surveillés", callback_data="trd:wallets")],
+            [InlineKeyboardButton("🔔 Alertes MC", callback_data="trd:alerts")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
+        ])
+
+    def _wallets_markup(wallets: list[dict]) -> InlineKeyboardMarkup:
+        rows: list[list[InlineKeyboardButton]] = []
+        for w in wallets:
+            tag = f" — {w['label']}" if w["label"] else ""
+            short = f"{w['address'][:4]}…{w['address'][-4:]}"
+            rows.append([
+                InlineKeyboardButton(
+                    f"{w['chain'].upper()} {short}{tag}",
+                    callback_data=f"trd:whold:{w['chain']}:{w['address']}",
+                ),
+                InlineKeyboardButton(
+                    "🗑", callback_data=f"trd:wdel:{w['chain']}:{w['address']}"
+                ),
+            ])
+        rows.append([InlineKeyboardButton("⬅️ Retour", callback_data="trd:home")])
+        return InlineKeyboardMarkup(rows)
+
+    def _alerts_markup(alerts: list[dict]) -> InlineKeyboardMarkup:
+        rows: list[list[InlineKeyboardButton]] = []
+        for a in alerts:
+            arrow = "≥" if a["direction"] == "above" else "≤"
+            state = "🟢" if a["armed"] else "⚫"
+            rows.append([
+                InlineKeyboardButton(
+                    f"{state} #{a['id']} {a['chain'].upper()} {arrow}${_fmt_mc(a['mc_target'])}",
+                    callback_data=f"trd:anoop:{a['id']}",
+                ),
+                InlineKeyboardButton("🗑", callback_data=f"trd:adel:{a['id']}"),
+            ])
+        rows.append([InlineKeyboardButton("⬅️ Retour", callback_data="trd:home")])
+        return InlineKeyboardMarkup(rows)
+
+    async def _render_home(query) -> None:
+        text = (
+            "*📈 Trading*\n"
+            "Surveille les wallets on-chain et reçois des alertes de marketcap."
+        )
+        try:
+            await query.edit_message_text(
+                text, parse_mode=ParseMode.MARKDOWN, reply_markup=_home_markup(),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
+    async def _render_wallets(query) -> None:
+        wallets = db.list_wallets()
+        if not wallets:
+            text = "*Wallets surveillés*\nAucun. Utilise `/watch <addr> <chain>`."
+        else:
+            lines = ["*Wallets surveillés*"]
+            for w in wallets:
+                label = f" — _{w['label']}_" if w["label"] else ""
+                lines.append(f"`{w['address']}` *{w['chain'].upper()}*{label}")
+            text = "\n".join(lines)
+        try:
+            await query.edit_message_text(
+                text, parse_mode=ParseMode.MARKDOWN, reply_markup=_wallets_markup(wallets),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
+    async def _render_alerts(query) -> None:
+        alerts = db.list_alerts()
+        if not alerts:
+            text = "*Alertes MC*\nAucune. Utilise `/alert <token> <chain> <mc>`."
+        else:
+            lines = ["*Alertes MC*"]
+            for a in alerts:
+                arrow = "≥" if a["direction"] == "above" else "≤"
+                state = "🟢" if a["armed"] else "⚫"
+                label = f" — _{a['label']}_" if a["label"] else ""
+                lines.append(
+                    f"{state} *#{a['id']}* `{a['token_address']}` "
+                    f"{a['chain'].upper()} {arrow}${_fmt_mc(a['mc_target'])}{label}"
+                )
+            text = "\n".join(lines)
+        try:
+            await query.edit_message_text(
+                text, parse_mode=ParseMode.MARKDOWN, reply_markup=_alerts_markup(alerts),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
+    @auth
+    async def on_trading_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        data = query.data or ""
+        parts = data.split(":")
+        ns = parts[0]
+        if ns != "trd":
+            return  # safety: shouldn't reach here due to pattern filter
+        action = parts[1] if len(parts) > 1 else "home"
+
+        if action == "home":
+            await _render_home(query)
+            return
+        if action == "wallets":
+            await _render_wallets(query)
+            return
+        if action == "alerts":
+            await _render_alerts(query)
+            return
+        if action == "wdel" and len(parts) >= 4:
+            chain, addr = parts[2], parts[3]
+            if db.remove_wallet(addr, chain):
+                monitor.notify_wallets_changed(chain)
+            await _render_wallets(query)
+            return
+        if action == "adel" and len(parts) >= 3:
+            try:
+                aid = int(parts[2])
+            except ValueError:
+                return
+            db.remove_alert(aid)
+            await _render_alerts(query)
+            return
+        if action == "whold" and len(parts) >= 4:
+            chain, addr = parts[2], parts[3]
+            await query.edit_message_text(
+                f"⏳ Fetching holdings for `{addr[:6]}…{addr[-4:]}`…",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            try:
+                if chain == "sol":
+                    from .solana import fetch_solana_holdings
+                    holdings, _ = await fetch_solana_holdings(monitor.helius_api_key, addr)
+                else:
+                    from .evm import fetch_evm_holdings
+                    holdings, _ = await fetch_evm_holdings(
+                        chain, monitor.alchemy_api_key, addr,
+                        price_client=monitor.price_client,
+                    )
+            except Exception as e:
+                logger.exception("inline holdings failed")
+                await query.edit_message_text(
+                    f"Error: `{type(e).__name__}: {e}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("⬅️ Retour", callback_data="trd:wallets")]]
+                    ),
+                )
+                return
+            total = sum((h.value_usd or 0) for h in holdings) or None
+            from .formatters import holdings_message
+            text = holdings_message(chain, addr, holdings, total)
+            await query.edit_message_text(
+                text, parse_mode=ParseMode.MARKDOWN, disable_web_page_preview=True,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Retour", callback_data="trd:wallets")]]
+                ),
+            )
+            return
+        if action == "anoop":
+            # No-op: row labels (no state change needed)
+            return
+
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))
     app.add_handler(CommandHandler("wallets", cmd_wallets))
@@ -327,3 +496,11 @@ def register_handlers(
     app.add_handler(CommandHandler("alerts", cmd_alerts))
     app.add_handler(CommandHandler("unalert", cmd_unalert))
     app.add_handler(CommandHandler("holdings", cmd_holdings))
+    # Must be registered BEFORE the catch-all bot.on_callback in bot.py;
+    # PTB matches handlers in registration order and stops at first hit.
+    # Since register_trading() runs after build_app() finishes adding the
+    # catch-all, we add it into group=-1 so it has higher priority.
+    app.add_handler(
+        CallbackQueryHandler(on_trading_callback, pattern=r"^trd:"),
+        group=-1,
+    )
