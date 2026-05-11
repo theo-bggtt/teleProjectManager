@@ -25,7 +25,7 @@ from .auth import restricted
 from .config import Config
 from .db import DB
 from .files import FileManager, PathEscapeError
-from .runner import TmuxRunner
+from .runner import make_runner
 from .shell import ShellRunner
 
 logger = logging.getLogger(__name__)
@@ -139,7 +139,7 @@ def _confirm_markup(action: str, name: str) -> InlineKeyboardMarkup:
 
 def build_app(cfg: Config) -> Application:
     db = DB(cfg.data_dir / "projects.db")
-    runner = TmuxRunner(cfg.data_dir / "logs")
+    runner = make_runner(cfg.data_dir / "logs")
     files_mgr = FileManager(cfg.data_dir / "backups")
     shell = ShellRunner(timeout=cfg.shell_timeout)
     auth = restricted(cfg.allowed_user_ids)
