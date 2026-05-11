@@ -493,7 +493,7 @@ def build_app(cfg: Config) -> Application:
                 )
             return
 
-        if ns == "proj" and len(parts) >= 2:
+        if ns == "proj" and len(parts) == 2:
             await _render_project_card(query, parts[1])
             return
 
