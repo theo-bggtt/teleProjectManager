@@ -18,6 +18,7 @@ from telegram.error import TelegramError
 
 from . import formatters
 from .db import TradingDB
+from .evm import EvmMonitor
 from .prices import PriceClient
 from .solana import SolanaMonitor, WalletEvent
 
@@ -53,6 +54,18 @@ class TradingMonitor:
             if cfg.trading.helius_api_key
             else None
         )
+        self._evms: dict[str, EvmMonitor] = {}
+        if cfg.trading.alchemy_api_key:
+            for chain in cfg.trading.evm_chains:
+                try:
+                    self._evms[chain] = EvmMonitor(
+                        chain=chain,
+                        api_key=cfg.trading.alchemy_api_key,
+                        db=db,
+                        on_event=self.dispatch,
+                    )
+                except ValueError as e:
+                    logger.warning("Skipping EVM chain %s: %s", chain, e)
 
     # ── lifecycle ─────────────────────────────────────────────────────
     async def start(self) -> None:
@@ -60,12 +73,17 @@ class TradingMonitor:
         if self._solana is not None:
             await self._solana.start()
             chains.append("sol")
-        # EVM + MC alert loops are added in later steps.
+        for chain, mon in self._evms.items():
+            await mon.start()
+            chains.append(chain)
+        # MC alert loop is added in step 7.
         logger.info("Trading monitor started (%s).", ", ".join(chains) or "no chains")
 
     async def stop(self) -> None:
         if self._solana is not None:
             await self._solana.stop()
+        for mon in self._evms.values():
+            await mon.stop()
         await self._prices.close()
         logger.info("Trading monitor stopped.")
 
@@ -73,6 +91,11 @@ class TradingMonitor:
     def notify_wallets_changed(self, chain: Optional[str] = None) -> None:
         if (chain is None or chain == "sol") and self._solana is not None:
             self._solana.notify_wallets_changed()
+        if chain is None:
+            for mon in self._evms.values():
+                mon.notify_wallets_changed()
+        elif chain in self._evms:
+            self._evms[chain].notify_wallets_changed()
 
     # ── event funnel ──────────────────────────────────────────────────
     async def dispatch(self, event: WalletEvent) -> None:

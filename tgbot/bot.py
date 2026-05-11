@@ -298,6 +298,97 @@ def build_app(cfg: Config) -> Application:
             reply_markup=_projects_list_markup(projs, statuses),
         )
 
+    # ─── action helpers ──────────────────────────────────────────────────
+    async def _format_action_card(action: dict) -> tuple[str, bool]:
+        mode = action.get("mode", "oneshot")
+        running = (
+            await runner.is_running(_action_runner_key(action["name"]))
+            if mode == "managed"
+            else False
+        )
+        status = (
+            f"Statut : {'🟢 running' if running else '⚪ stopped'}"
+            if mode == "managed"
+            else "Statut : ⚡ oneshot (déclencher pour exécuter)"
+        )
+        confirm = "🛡 confirmation requise" if action.get("require_confirm") else "déclenchement direct"
+        text = (
+            f"*{action['name']}*\n"
+            f"Commande : `{action['command']}`\n"
+            f"Dossier : `{action.get('cwd') or '(héritage du bot)'}`\n"
+            f"Mode : `{mode}` — {confirm}\n"
+            f"{status}"
+        )
+        return text, running
+
+    async def _render_action_card(query, name: str) -> None:
+        action = db.get_action(name)
+        if not action:
+            await query.edit_message_text(
+                f"Action `{name}` introuvable.", parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        text, running = await _format_action_card(action)
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=_action_card_markup(name, action.get("mode", "oneshot"), running),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
+    async def _render_actions_list(query) -> None:
+        actions = db.list_actions()
+        statuses = {
+            a["name"]: await runner.is_running(_action_runner_key(a["name"]))
+            for a in actions
+            if a.get("mode") == "managed"
+        }
+        text = "*Actions*" if actions else "*Actions*\nAucune action enregistrée."
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_actions_list_markup(actions, statuses),
+        )
+
+    async def _execute_action(update: Update, query, action: dict) -> None:
+        """Run an action — oneshot via shell, managed via runner."""
+        name = action["name"]
+        mode = action.get("mode", "oneshot")
+        cwd = action.get("cwd") or None
+        if mode == "managed":
+            ok, msg = await runner.start(
+                _action_runner_key(name),
+                action["command"],
+                cwd or str(Path.cwd()),
+            )
+            prefix = "▶️" if ok else "⚠️"
+            await query.edit_message_text(
+                f"{prefix} `{name}` : {msg}",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=_action_card_markup(name, mode, ok),
+            )
+            return
+        # oneshot
+        await query.edit_message_text(
+            f"⏳ Exécution de `{name}`…", parse_mode=ParseMode.MARKDOWN,
+        )
+        rc, out = await shell.run(action["command"], cwd)
+        body = out or "(aucune sortie)"
+        # send result; keep the action card available as a follow-up
+        await _send_text_or_file(
+            update, body, f"{name}-output.txt", header=f"{name} — exit {rc}",
+        )
+        # restore the card so the user can re-run
+        text, running = await _format_action_card(action)
+        await update.effective_message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=_action_card_markup(name, mode, running),
+        )
+
     @auth
     async def on_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -389,6 +480,80 @@ def build_app(cfg: Config) -> Application:
             await _render_project_card(query, name)
             return
 
+        # ─── Actions namespaces ──────────────────────────────────────────
+        if ns == "actions" and len(parts) >= 2:
+            target = parts[1]
+            if target == "new":
+                # handled by ConversationHandler entry — nothing to do here
+                return
+            await _render_action_card(query, target)
+            return
+
+        if ns == "act_a" and len(parts) == 3:
+            verb, name = parts[1], parts[2]
+            action = db.get_action(name)
+            if not action:
+                await query.edit_message_text(
+                    f"Action `{name}` introuvable.", parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+            if verb == "run":
+                if action.get("require_confirm"):
+                    await query.edit_message_text(
+                        f"Confirmer : exécuter `{name}` ?",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=_action_confirm_markup("run", name),
+                    )
+                    return
+                await _execute_action(update, query, action)
+                return
+            if verb == "del":
+                await query.edit_message_text(
+                    f"Confirmer : supprimer l'action `{name}` ?",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_action_confirm_markup("del", name),
+                )
+                return
+            if action.get("mode") != "managed":
+                await _render_action_card(query, name)
+                return
+            key = _action_runner_key(name)
+            if verb == "stop":
+                await runner.stop(key)
+            elif verb == "restart":
+                await runner.restart(key, action["command"], action["cwd"] or str(Path.cwd()))
+            elif verb == "logs":
+                out = await runner.get_logs(key, cfg.default_log_lines)
+                await _send_text_or_file(
+                    update, out, f"{name}-logs.txt",
+                    header=f"{name} (last {cfg.default_log_lines})",
+                )
+                return
+            await _render_action_card(query, name)
+            return
+
+        if ns == "cfm_a" and len(parts) == 3:
+            verb, name = parts[1], parts[2]
+            if verb == "no":
+                await _render_action_card(query, name)
+                return
+            action = db.get_action(name)
+            if not action:
+                await query.edit_message_text(
+                    f"Action `{name}` introuvable.", parse_mode=ParseMode.MARKDOWN,
+                )
+                return
+            if verb == "del":
+                if action.get("mode") == "managed":
+                    await runner.stop(_action_runner_key(name))
+                db.remove_action(name)
+                await _render_actions_list(query)
+                return
+            if verb == "run":
+                await _execute_action(update, query, action)
+                return
+            return
+
     # ─── add-project flow (triggered by inline button menu:add) ──────────
     @auth
     async def add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -441,6 +606,207 @@ def build_app(cfg: Config) -> Application:
             parse_mode=ParseMode.MARKDOWN,
         )
         return ConversationHandler.END
+
+    # ─── add-action flow (triggered by /addaction or inline button) ──────
+    @auth
+    async def action_add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.callback_query is not None:
+            query = update.callback_query
+            await query.answer()
+            await query.edit_message_text(
+                "*Nouvelle action*\nEnvoie un nom court (ou /cancel).",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        else:
+            await update.message.reply_text(
+                "*Nouvelle action*\nEnvoie un nom court (ou /cancel).",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        return ADD_A_NAME
+
+    async def action_add_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        name = update.message.text.strip()
+        if not name or ":" in name or " " in name:
+            await update.message.reply_text(
+                "Nom invalide (pas d'espace ni de `:`). Réessaie ou /cancel.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return ADD_A_NAME
+        if db.get_action(name):
+            await update.message.reply_text(
+                f"Action `{name}` existe déjà. Choisis un autre nom ou /cancel.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return ADD_A_NAME
+        ctx.user_data["addact_name"] = name
+        await update.message.reply_text(
+            f"Nom : `{name}`\n"
+            f"Envoie la commande à exécuter (ex : `python script.py`, "
+            f"`docker compose up -d`, `git pull`).",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ADD_A_COMMAND
+
+    async def action_add_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        command = update.message.text.strip()
+        if not command:
+            await update.message.reply_text("Commande vide. Réessaie ou /cancel.")
+            return ADD_A_COMMAND
+        ctx.user_data["addact_command"] = command
+        await update.message.reply_text(
+            "Dossier de travail (chemin absolu) ou `-` pour utiliser le dossier du bot.",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ADD_A_CWD
+
+    async def action_add_cwd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        text = update.message.text.strip()
+        if text == "-" or text == "":
+            cwd = None
+        else:
+            cwd_path = Path(text).expanduser()
+            if not cwd_path.is_dir():
+                await update.message.reply_text(
+                    f"Pas un dossier : `{cwd_path}`. Réessaie ou `-` pour sauter, ou /cancel.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return ADD_A_CWD
+            cwd = str(cwd_path.resolve())
+        ctx.user_data["addact_cwd"] = cwd
+        await update.message.reply_text(
+            "Mode d'exécution ?",
+            reply_markup=_action_mode_markup(),
+        )
+        return ADD_A_MODE
+
+    async def action_add_mode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        parts = (query.data or "").split(":")
+        if len(parts) != 3 or parts[2] not in ("oneshot", "managed"):
+            await query.edit_message_text("Mode invalide.")
+            return ConversationHandler.END
+        ctx.user_data["addact_mode"] = parts[2]
+        await query.edit_message_text(
+            "Demander une confirmation avant chaque exécution ?",
+            reply_markup=_action_yesno_markup(),
+        )
+        return ADD_A_CONFIRM
+
+    async def action_add_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        parts = (query.data or "").split(":")
+        if len(parts) != 3 or parts[2] not in ("yes", "no"):
+            await query.edit_message_text("Choix invalide.")
+            return ConversationHandler.END
+        require_confirm = parts[2] == "yes"
+        name = ctx.user_data.pop("addact_name", None)
+        command = ctx.user_data.pop("addact_command", None)
+        cwd = ctx.user_data.pop("addact_cwd", None)
+        mode = ctx.user_data.pop("addact_mode", "oneshot")
+        if not name or not command:
+            await query.edit_message_text("État perdu, recommence avec /addaction.")
+            return ConversationHandler.END
+        if not db.add_action(name, command, cwd, mode, require_confirm):
+            await query.edit_message_text(
+                f"Action `{name}` existe déjà.", parse_mode=ParseMode.MARKDOWN,
+            )
+            return ConversationHandler.END
+        cwd_disp = cwd or "(héritage du bot)"
+        await query.edit_message_text(
+            f"✅ Action *{name}* créée.\n"
+            f"Mode : `{mode}` — confirmation : `{'oui' if require_confirm else 'non'}`\n"
+            f"Commande : `{command}`\n"
+            f"Dossier : `{cwd_disp}`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ConversationHandler.END
+
+    async def action_add_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        for k in ("addact_name", "addact_command", "addact_cwd", "addact_mode"):
+            ctx.user_data.pop(k, None)
+        await update.message.reply_text("Cancelled.")
+        return ConversationHandler.END
+
+    # ─── /actions /runaction /delaction ──────────────────────────────────
+    @auth
+    async def cmd_actions(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        actions = db.list_actions()
+        if not actions:
+            await update.message.reply_text(
+                "Aucune action. Utilise `/addaction` pour en créer une.",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        lines = []
+        for a in actions:
+            mode = a.get("mode", "oneshot")
+            if mode == "managed":
+                running = await runner.is_running(_action_runner_key(a["name"]))
+                icon = "🟢" if running else "🔁"
+            else:
+                icon = "⚡"
+            lines.append(f"{icon} *{a['name']}* — `{a['command']}`")
+        await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+    @auth
+    async def cmd_runaction(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if not ctx.args:
+            await update.message.reply_text(
+                "Usage: `/runaction <name>`", parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        name = ctx.args[0]
+        action = db.get_action(name)
+        if not action:
+            await update.message.reply_text(
+                f"Action `{name}` introuvable.", parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        if action.get("require_confirm"):
+            await update.message.reply_text(
+                f"Confirmer : exécuter `{name}` ?",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=_action_confirm_markup("run", name),
+            )
+            return
+        mode = action.get("mode", "oneshot")
+        cwd = action.get("cwd") or None
+        if mode == "managed":
+            ok, msg = await runner.start(
+                _action_runner_key(name), action["command"], cwd or str(Path.cwd()),
+            )
+            prefix = "▶️" if ok else "⚠️"
+            await update.message.reply_text(
+                f"{prefix} `{name}` : {msg}", parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        await update.message.reply_text(
+            f"⏳ Exécution de `{name}`…", parse_mode=ParseMode.MARKDOWN,
+        )
+        rc, out = await shell.run(action["command"], cwd)
+        await _send_text_or_file(
+            update, out or "(aucune sortie)", f"{name}-output.txt",
+            header=f"{name} — exit {rc}",
+        )
+
+    @auth
+    async def cmd_delaction(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if not ctx.args:
+            await update.message.reply_text(
+                "Usage: `/delaction <name>`", parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        name = ctx.args[0]
+        action = db.get_action(name)
+        if not action:
+            await update.message.reply_text("Pas trouvée.")
+            return
+        if action.get("mode") == "managed":
+            await runner.stop(_action_runner_key(name))
+        ok = db.remove_action(name)
+        await update.message.reply_text("Supprimée." if ok else "Pas trouvée.")
 
     # ─── /projects ────────────────────────────────────────────────────────
     @auth
@@ -760,6 +1126,22 @@ def build_app(cfg: Config) -> Application:
         conversation_timeout=300,
     )
 
+    action_add_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("addaction", action_add_start),
+            CallbackQueryHandler(action_add_start, pattern=r"^actions:new$"),
+        ],
+        states={
+            ADD_A_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, action_add_name)],
+            ADD_A_COMMAND: [MessageHandler(filters.TEXT & ~filters.COMMAND, action_add_command)],
+            ADD_A_CWD: [MessageHandler(filters.TEXT & ~filters.COMMAND, action_add_cwd)],
+            ADD_A_MODE: [CallbackQueryHandler(action_add_mode, pattern=r"^addact:mode:")],
+            ADD_A_CONFIRM: [CallbackQueryHandler(action_add_confirm, pattern=r"^addact:cfm:")],
+        },
+        fallbacks=[CommandHandler("cancel", action_add_cancel)],
+        conversation_timeout=300,
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("projects", cmd_projects))
@@ -774,8 +1156,12 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(CommandHandler("ls", cmd_ls))
     app.add_handler(CommandHandler("get", cmd_get))
     app.add_handler(CommandHandler("shell", cmd_shell))
+    app.add_handler(CommandHandler("actions", cmd_actions))
+    app.add_handler(CommandHandler("runaction", cmd_runaction))
+    app.add_handler(CommandHandler("delaction", cmd_delaction))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(add_conv)
+    app.add_handler(action_add_conv)
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_error_handler(on_error)
 
@@ -793,6 +1179,10 @@ def build_app(cfg: Config) -> Application:
             BotCommand("ls", "List files"),
             BotCommand("get", "Download a file"),
             BotCommand("shell", "Run shell command"),
+            BotCommand("actions", "List saved actions"),
+            BotCommand("addaction", "Create a new action"),
+            BotCommand("runaction", "Run an action by name"),
+            BotCommand("delaction", "Delete an action"),
             BotCommand("remove", "Remove project"),
             BotCommand("help", "Show help"),
         ]
