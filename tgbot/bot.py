@@ -361,6 +361,80 @@ def build_app(cfg: Config) -> Application:
             reply_markup=_main_menu_markup(trading_enabled),
         )
 
+    def _wizard_markup(extra_rows: list[list[InlineKeyboardButton]] | None = None) -> InlineKeyboardMarkup:
+        """Main-menu buttons + optional extra rows + Cancel row."""
+        base = _main_menu_markup(trading_enabled).inline_keyboard
+        rows: list[list[InlineKeyboardButton]] = [list(r) for r in base]
+        if extra_rows:
+            rows.extend(extra_rows)
+        rows.append([InlineKeyboardButton("❌ Annuler", callback_data="wiz:cancel")])
+        return InlineKeyboardMarkup(rows)
+
+    async def _wizard_step(
+        update: Update,
+        ctx: ContextTypes.DEFAULT_TYPE,
+        text: str,
+        extra_rows: list[list[InlineKeyboardButton]] | None = None,
+    ) -> None:
+        """Edit (or create) the single wizard message with the current question."""
+        markup = _wizard_markup(extra_rows)
+        msg_id = ctx.user_data.get("wizard_msg_id")
+        chat_id = ctx.user_data.get("wizard_chat_id")
+        if msg_id is None and update.callback_query is not None:
+            msg_id = update.callback_query.message.message_id
+            chat_id = update.callback_query.message.chat_id
+            ctx.user_data["wizard_msg_id"] = msg_id
+            ctx.user_data["wizard_chat_id"] = chat_id
+        if msg_id is not None and chat_id is not None:
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=markup,
+                )
+                return
+            except Exception:
+                ctx.user_data.pop("wizard_msg_id", None)
+                ctx.user_data.pop("wizard_chat_id", None)
+        sent = await update.effective_message.reply_text(
+            text,
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=markup,
+        )
+        ctx.user_data["wizard_msg_id"] = sent.message_id
+        ctx.user_data["wizard_chat_id"] = sent.chat_id
+
+    async def _wizard_finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Replace the wizard message with the clean main menu. Clean user_data."""
+        msg_id = ctx.user_data.get("wizard_msg_id")
+        chat_id = ctx.user_data.get("wizard_chat_id")
+        for k in (
+            "wizard_msg_id", "wizard_chat_id",
+            "add_name",
+            "addact_name", "addact_command", "addact_cwd", "addact_mode",
+            "cfg_project",
+        ):
+            ctx.user_data.pop(k, None)
+        text = "*Menu principal*\nChoisis une action :"
+        markup = _main_menu_markup(trading_enabled)
+        if msg_id is not None and chat_id is not None:
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=text,
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=markup,
+                )
+                return
+            except Exception:
+                pass
+        await update.effective_message.reply_text(
+            text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup,
+        )
+
     async def _execute_action(update: Update, query, action: dict) -> None:
         """Run an action — oneshot via shell, managed via runner."""
         name = action["name"]
