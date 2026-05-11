@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 CFG_START_CMD, CFG_ENTRY_FILE = range(2)
 # add-project conversation states (from inline button)
 ADD_NAME, ADD_PATH = range(2, 4)
+# add-action conversation states
+ADD_A_NAME, ADD_A_COMMAND, ADD_A_CWD, ADD_A_MODE, ADD_A_CONFIRM = range(4, 9)
 
 # Telegram message limit is ~4096; leave headroom for markdown fences
 INLINE_TEXT_LIMIT = 3500
@@ -62,6 +64,12 @@ To upload: send a document with caption `/put <name> <path>`
 
 *Shell*
 `/shell <name> <command...>` — run inside project dir
+
+*Actions*
+`/actions` — list saved actions
+`/addaction` — create a new action (interactive)
+`/runaction <name>` — execute an action by name
+`/delaction <name>` — delete an action
 
 *Trading* (if enabled)
 `/watch <addr> <chain> [label]` — track a wallet
@@ -104,7 +112,10 @@ async def _send_text_or_file(update: Update, text: str, filename: str,
 # callback_data uses ":" as separator — project names with ":" would break parsing.
 # In practice names are alphanum/_/- so we accept that limitation.
 def _main_menu_markup(trading_enabled: bool = False) -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton("📂 Projets", callback_data="menu:projects")]]
+    rows = [[
+        InlineKeyboardButton("📂 Projets", callback_data="menu:projects"),
+        InlineKeyboardButton("🚀 Actions", callback_data="menu:actions"),
+    ]]
     if trading_enabled:
         rows.append([InlineKeyboardButton("📈 Trading", callback_data="trd:home")])
     rows.append([InlineKeyboardButton("❓ Aide", callback_data="menu:help")])
@@ -146,6 +157,81 @@ def _confirm_markup(action: str, name: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton("❌ Annuler", callback_data=f"proj:{name}"),
         ],
     ])
+
+
+def _actions_list_markup(actions: list[dict], statuses: dict[str, bool]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton("➕ Nouvelle action", callback_data="actions:new")]]
+    for a in actions:
+        mode = a.get("mode", "oneshot")
+        if mode == "managed":
+            icon = "🟢" if statuses.get(a["name"]) else "🔁"
+        else:
+            icon = "⚡"
+        rows.append([
+            InlineKeyboardButton(f"{icon} {a['name']}", callback_data=f"actions:{a['name']}"),
+            InlineKeyboardButton("🗑", callback_data=f"act_a:del:{a['name']}"),
+        ])
+    rows.append([InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _action_card_markup(name: str, mode: str, running: bool) -> InlineKeyboardMarkup:
+    if mode == "managed":
+        run_btn = (
+            InlineKeyboardButton("⏹ Stop", callback_data=f"act_a:stop:{name}")
+            if running
+            else InlineKeyboardButton("▶️ Démarrer", callback_data=f"act_a:run:{name}")
+        )
+        rows = [
+            [run_btn, InlineKeyboardButton("🔄 Redémarrer", callback_data=f"act_a:restart:{name}")],
+            [
+                InlineKeyboardButton("📄 Logs", callback_data=f"act_a:logs:{name}"),
+                InlineKeyboardButton("🗑 Supprimer", callback_data=f"act_a:del:{name}"),
+            ],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="menu:actions")],
+        ]
+    else:
+        rows = [
+            [
+                InlineKeyboardButton("▶️ Exécuter", callback_data=f"act_a:run:{name}"),
+                InlineKeyboardButton("🗑 Supprimer", callback_data=f"act_a:del:{name}"),
+            ],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="menu:actions")],
+        ]
+    return InlineKeyboardMarkup(rows)
+
+
+def _action_confirm_markup(verb: str, name: str) -> InlineKeyboardMarkup:
+    """Yes/No confirmation for an action (verb is 'run' or 'del')."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Confirmer", callback_data=f"cfm_a:{verb}:{name}"),
+            InlineKeyboardButton("❌ Annuler", callback_data=f"cfm_a:no:{name}"),
+        ],
+    ])
+
+
+def _action_mode_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⚡ Oneshot", callback_data="addact:mode:oneshot"),
+            InlineKeyboardButton("🔁 Managed", callback_data="addact:mode:managed"),
+        ],
+    ])
+
+
+def _action_yesno_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("Oui", callback_data="addact:cfm:yes"),
+            InlineKeyboardButton("Non", callback_data="addact:cfm:no"),
+        ],
+    ])
+
+
+def _action_runner_key(name: str) -> str:
+    """Prefix action names when handed to the runner so they don't collide with projects."""
+    return f"action_{name}"
 
 
 def build_app(cfg: Config) -> Application:
@@ -230,6 +316,8 @@ def build_app(cfg: Config) -> Application:
                 )
             elif target == "projects":
                 await _render_projects_list(query)
+            elif target == "actions":
+                await _render_actions_list(query)
             elif target == "help":
                 await query.edit_message_text(
                     HELP_TEXT,

@@ -24,6 +24,7 @@ from .db import TradingDB
 if TYPE_CHECKING:
     from telegram.ext import Application
     from ..config import Config
+    from .monitor import TradingMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,12 @@ def _fmt_mc(mc: float) -> str:
     return f"{mc:.2f}"
 
 
-def register_handlers(app: "Application", cfg: "Config", db: TradingDB) -> None:
+def register_handlers(
+    app: "Application",
+    cfg: "Config",
+    db: TradingDB,
+    monitor: "TradingMonitor",
+) -> None:
     """Register trading command handlers on the Application."""
     auth = restricted(cfg.allowed_user_ids)
 
@@ -102,6 +108,7 @@ def register_handlers(app: "Application", cfg: "Config", db: TradingDB) -> None:
             return
         norm = _normalize_address(address, chain)
         if db.add_wallet(norm, chain, label):
+            monitor.notify_wallets_changed(chain)
             tag = f" ({label})" if label else ""
             await update.message.reply_text(
                 f"✅ Watching `{norm}` on *{chain.upper()}*{tag}",
@@ -129,6 +136,8 @@ def register_handlers(app: "Application", cfg: "Config", db: TradingDB) -> None:
         removed = db.remove_wallet(norm, chain)
         if removed == 0 and chain is None:
             removed = db.remove_wallet(address)
+        if removed:
+            monitor.notify_wallets_changed(chain)
         await update.message.reply_text(
             f"Removed {removed} wallet entr{'y' if removed == 1 else 'ies'}."
         )

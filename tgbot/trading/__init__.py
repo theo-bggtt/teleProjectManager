@@ -27,8 +27,15 @@ def register_trading(app: "Application", cfg: "Config") -> None:
     # Local imports: optional deps (aiohttp/websockets) only loaded when enabled.
     from .db import TradingDB
     from .handlers import register_handlers
+    from .monitor import TradingMonitor, install_monitor_lifecycle
+    from .prices import PriceClient
 
     db = TradingDB(cfg.data_dir / "trading.db")
-    register_handlers(app, cfg, db)
+    price_client = PriceClient()
+    monitor = TradingMonitor(app, cfg, db, price_client)
+
+    register_handlers(app, cfg, db, monitor)
+    install_monitor_lifecycle(app, monitor)
+
     logger.info("Trading module registered (chains: sol + %s).",
                 ", ".join(cfg.trading.evm_chains))
