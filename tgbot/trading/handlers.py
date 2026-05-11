@@ -650,12 +650,17 @@ def register_handlers(
         return ConversationHandler.END
 
     async def wadd_escape(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Catch-all fallback: clean wadd state, route the callback through on_trading_callback."""
+        """Catch-all fallback during wadd wizard: clean state and route the
+        callback to the appropriate dispatcher based on namespace."""
         for k in ("wadd_chain", "wadd_addr"):
             ctx.user_data.pop(k, None)
         ctx.user_data.pop("wizard_msg_id", None)
         ctx.user_data.pop("wizard_chat_id", None)
-        await on_trading_callback(update, ctx)
+        data = update.callback_query.data if update.callback_query else ""
+        if data.startswith("trd:"):
+            await on_trading_callback(update, ctx)
+        elif wizard_escape is not None:
+            await wizard_escape(update, ctx)
         return ConversationHandler.END
 
     async def wadd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
