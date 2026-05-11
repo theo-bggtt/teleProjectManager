@@ -70,7 +70,7 @@ Ajout d'un bouton Holdings :
 | `trd:hold` | Ouvre picker holdings |
 | `trd:hget:<chain>:<addr>` | Affiche holdings du wallet choisi |
 
-L'encodage du chemin (`<encoded-path>`) utilise un slug court (base64 URL-safe sans padding) pour éviter les conflits avec `:` dans callback_data. Le mapping `slug → path` est stocké dans `ctx.chat_data["files_path_map"]` (purgé à chaque retour menu).
+L'encodage du chemin (`<encoded-path>`) utilise un slug court (8 caractères base32 issus d'un hash du chemin) pour respecter la limite de 64 octets de Telegram sur `callback_data`. Le mapping `slug → path` est stocké dans `ctx.chat_data["files_path_map"]` (dict global, jamais purgé pendant une session — collisions de hash improbables à cette échelle).
 
 ## Wizards
 
@@ -149,9 +149,9 @@ Affichage :
   - Fichier : `[ 📄 nom.ext ]` → `proj:fget:<name>:<slug-fichier>`
   - Dossier : `[ 📁 sub/  ]` → `proj:files:<name>:<slug-sous-dossier>`
 - Pied :
-  - `[ ⬅️ ] [ p/total ] [ ➡️ ]` si pages > 1 (callback `proj:files:<name>:<slug>?page=...` ; on stocke page dans chat_data, callback reste simple)
+  - `[ ⬅️ ] [ p/total ] [ ➡️ ]` si pages > 1. Callbacks `proj:fpg:<name>:<slug>:prev` et `proj:fpg:<name>:<slug>:next`. La page courante est stockée dans `chat_data[f"files_page:{name}:{slug}"]`.
   - `[ ⬆️ Parent ]` si pas à la racine → `proj:files:<name>:<slug-parent>`
-  - `[ ⬅️ Retour ]` → `proj:` (menu du projet)
+  - `[ ⬅️ Retour ]` → `proj:<name>` (callback déjà géré, ramène au menu du projet)
 
 **Route `proj:fget:<name>:<slug>`** :
 - Résout `slug → rel` via `chat_data["files_path_map"]`. Si absent → toast "fichier expiré, rouvre le browser".
@@ -226,7 +226,7 @@ Les wizards (`trd:wadd`, `trd:aadd`, `proj:shell:*`, `proj:cfg:*`) sont intercep
 - Pas de `/put` (upload) inline — usage minoritaire, `/put` en caption suffit.
 - Pas de suppression de wallet/alerte depuis le picker holdings — déjà disponible dans les listes Wallets/Alertes.
 - Pas de tests unitaires — le code Telegram bot n'a pas de suite de tests à étendre, validation manuelle.
-- Le bouton `📁 Fichiers` est désactivé visuellement si `proj.path` n'existe pas (toast erreur au click).
+- Si `proj.path` n'existe pas sur disque au moment du click sur `📁 Fichiers`, on affiche un toast d'erreur (`query.answer(show_alert=True)`) et on reste sur le menu projet (pas de pré-désactivation du bouton).
 
 ## Validation manuelle (après build)
 
