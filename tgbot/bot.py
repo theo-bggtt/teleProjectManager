@@ -395,9 +395,12 @@ def build_app(cfg: Config) -> Application:
                     reply_markup=markup,
                 )
                 return
-            except Exception:
+            except BadRequest:
                 ctx.user_data.pop("wizard_msg_id", None)
                 ctx.user_data.pop("wizard_chat_id", None)
+        # Fallback path (existing message edit failed or no message yet)
+        if update.effective_message is None:
+            return
         sent = await update.effective_message.reply_text(
             text,
             parse_mode=ParseMode.MARKDOWN,
@@ -429,8 +432,10 @@ def build_app(cfg: Config) -> Application:
                     reply_markup=markup,
                 )
                 return
-            except Exception:
+            except BadRequest:
                 pass
+        if update.effective_message is None:
+            return
         await update.effective_message.reply_text(
             text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup,
         )
