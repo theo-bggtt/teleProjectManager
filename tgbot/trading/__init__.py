@@ -14,7 +14,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def register_trading(app: "Application", cfg: "Config") -> None:
+def register_trading(
+    app: "Application",
+    cfg: "Config",
+    *,
+    wizard_step=None,
+    wizard_finish=None,
+    wizard_escape=None,
+) -> None:
     """Wire trading handlers + monitor into the Telegram Application.
 
     No-op when ``cfg.trading`` is missing or disabled — keeping the bot
@@ -34,7 +41,12 @@ def register_trading(app: "Application", cfg: "Config") -> None:
     price_client = PriceClient()
     monitor = TradingMonitor(app, cfg, db, price_client)
 
-    register_handlers(app, cfg, db, monitor)
+    register_handlers(
+        app, cfg, db, monitor,
+        wizard_step=wizard_step,
+        wizard_finish=wizard_finish,
+        wizard_escape=wizard_escape,
+    )
     install_monitor_lifecycle(app, monitor)
 
     logger.info("Trading module registered (chains: sol + %s).",

@@ -17,7 +17,14 @@ from typing import TYPE_CHECKING
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
+)
 
 from ..auth import restricted
 from .db import TradingDB
@@ -30,6 +37,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SUPPORTED_CHAINS = ("sol", "eth", "base", "bsc")
+
+TRD_WADD_CHAIN = 800
+TRD_WADD_ADDR = 801
+TRD_WADD_LABEL = 802
 
 _SOL_ADDR_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _EVM_ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
@@ -78,6 +89,10 @@ def register_handlers(
     cfg: "Config",
     db: TradingDB,
     monitor: "TradingMonitor",
+    *,
+    wizard_step=None,
+    wizard_finish=None,
+    wizard_escape=None,
 ) -> None:
     """Register trading command handlers on the Application."""
     auth = restricted(cfg.allowed_user_ids)
@@ -566,6 +581,93 @@ def register_handlers(
         if action == "anoop":
             # No-op: row labels (no state change needed)
             return
+
+    # ── Add Wallet wizard ──────────────────────────────────────────────────
+    async def wadd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        rows = [[
+            InlineKeyboardButton(c.upper(), callback_data=f"trd:wadd:chain:{c}")
+            for c in SUPPORTED_CHAINS
+        ]]
+        await wizard_step(update, ctx, "➕ Ajouter wallet\n\nChoisis la chaîne :", extra_rows=rows)
+        return TRD_WADD_CHAIN
+
+    async def wadd_chain(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        parts = (query.data or "").split(":")
+        if len(parts) != 4:
+            return TRD_WADD_CHAIN
+        chain = parts[3]
+        if chain not in SUPPORTED_CHAINS:
+            return TRD_WADD_CHAIN
+        ctx.user_data["wadd_chain"] = chain
+        await wizard_step(update, ctx, f"Chaîne : *{chain.upper()}*\n\nEnvoie l'adresse du wallet :")
+        return TRD_WADD_ADDR
+
+    async def wadd_addr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        chain = ctx.user_data.get("wadd_chain")
+        if not chain:
+            await wizard_step(update, ctx, "⚠️ État perdu.")
+            return ConversationHandler.END
+        addr = update.message.text.strip()
+        if not validate_address(addr, chain):
+            await wizard_step(
+                update, ctx,
+                f"❌ Adresse invalide pour *{chain.upper()}*. Réessaie :",
+            )
+            return TRD_WADD_ADDR
+        ctx.user_data["wadd_addr"] = _normalize_address(addr, chain)
+        await wizard_step(update, ctx, "Label optionnel (ou tape `skip`) :")
+        return TRD_WADD_LABEL
+
+    async def wadd_label(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        text = update.message.text.strip()
+        label = None if text.lower() == "skip" else text
+        chain = ctx.user_data.get("wadd_chain")
+        addr = ctx.user_data.get("wadd_addr")
+        if not chain or not addr:
+            await wizard_step(update, ctx, "⚠️ État perdu.")
+            return ConversationHandler.END
+        if db.add_wallet(addr, chain, label):
+            monitor.notify_wallets_changed(chain)
+            msg = f"✅ Watching `{addr}` sur *{chain.upper()}*"
+        else:
+            msg = f"ℹ️ Déjà surveillé : `{addr}` sur *{chain.upper()}*"
+        await wizard_step(update, ctx, msg)
+        for k in ("wadd_chain", "wadd_addr"):
+            ctx.user_data.pop(k, None)
+        await wizard_finish(update, ctx)
+        return ConversationHandler.END
+
+    async def wadd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        for k in ("wadd_chain", "wadd_addr"):
+            ctx.user_data.pop(k, None)
+        await wizard_finish(update, ctx)
+        return ConversationHandler.END
+
+    wadd_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(wadd_start, pattern=r"^trd:wadd$")],
+        states={
+            TRD_WADD_CHAIN: [CallbackQueryHandler(wadd_chain, pattern=r"^trd:wadd:chain:")],
+            TRD_WADD_ADDR: [MessageHandler(filters.TEXT & ~filters.COMMAND, wadd_addr)],
+            TRD_WADD_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, wadd_label)],
+        },
+        fallbacks=[
+            CallbackQueryHandler(wadd_cancel, pattern=r"^wiz:cancel$"),
+            CallbackQueryHandler(wizard_escape),
+        ],
+    )
+    app.add_handler(wadd_conv, group=-1)
 
     app.add_handler(CommandHandler("watch", cmd_watch))
     app.add_handler(CommandHandler("unwatch", cmd_unwatch))

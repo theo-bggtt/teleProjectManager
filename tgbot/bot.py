@@ -1555,6 +1555,11 @@ def build_app(cfg: Config) -> Application:
     app.post_init = post_init
 
     # Wire the optional trading module — no-op if [trading] is missing/disabled.
-    register_trading(app, cfg)
+    register_trading(
+        app, cfg,
+        wizard_step=_wizard_step,
+        wizard_finish=_wizard_finish,
+        wizard_escape=_wizard_escape,
+    )
 
     return app
