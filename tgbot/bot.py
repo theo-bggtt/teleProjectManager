@@ -594,6 +594,57 @@ def build_app(cfg: Config) -> Application:
                 )
             return
 
+        if ns == "proj" and len(parts) >= 2 and parts[1] in ("files", "fget", "fpg"):
+            sub = parts[1]
+            rest = parts[2] if len(parts) > 2 else ""
+            rest_parts = rest.split(":")
+            name = rest_parts[0] if rest_parts else ""
+            if not name or not db.get_project(name):
+                await query.answer(text=f"Projet {name} introuvable", show_alert=True)
+                return
+
+            if sub == "files":
+                slug = rest_parts[1] if len(rest_parts) > 1 else "_"
+                rel = _files_resolve(ctx, slug)
+                if rel is None:
+                    await query.answer(text="Chemin expiré, réouvre Fichiers", show_alert=True)
+                    return
+                await _render_files(query, ctx, name, rel)
+                return
+
+            if sub == "fget":
+                slug = rest_parts[1] if len(rest_parts) > 1 else None
+                rel = _files_resolve(ctx, slug) if slug else None
+                if rel is None:
+                    await query.answer(text="Fichier expiré, réouvre Fichiers", show_alert=True)
+                    return
+                proj = db.get_project(name)
+                try:
+                    target = files_mgr.get_file(proj["path"], rel)
+                except (PathEscapeError, FileNotFoundError, IsADirectoryError) as e:
+                    await query.answer(text=str(e), show_alert=True)
+                    return
+                with target.open("rb") as f:
+                    await query.message.reply_document(
+                        document=f, filename=target.name,
+                        caption=f"/put {name} {rel}",
+                    )
+                return
+
+            if sub == "fpg":
+                if len(rest_parts) < 3:
+                    return
+                slug, direction = rest_parts[1], rest_parts[2]
+                rel = _files_resolve(ctx, slug)
+                if rel is None:
+                    await query.answer(text="Page expirée", show_alert=True)
+                    return
+                page_key = f"files_page:{name}:{slug}"
+                cur = ctx.chat_data.get(page_key, 0)
+                ctx.chat_data[page_key] = cur + (1 if direction == "next" else -1)
+                await _render_files(query, ctx, name, rel)
+                return
+
         if ns == "proj" and len(parts) == 2:
             await _render_project_card(query, parts[1])
             return
