@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import sys
+from html import escape as html_escape
 from io import BytesIO
 from pathlib import Path
 
@@ -36,6 +37,13 @@ from .runner import make_runner
 from .shell import ShellRunner
 from .trading import register_trading
 from .scheduler import register_scheduler
+from .shell_mode import (
+    ShellSession,
+    ShellSessionStore,
+    resolve_cd,
+    strip_ansi,
+    truncate_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +58,9 @@ PROJ_SHELL_CMD = 700
 # Telegram message limit is ~4096; leave headroom for markdown fences
 INLINE_TEXT_LIMIT = 3500
 PAGE_SIZE = 10
+
+BOT_ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+shell_sessions = ShellSessionStore()
 
 
 HELP_TEXT = """*Telegram Project Manager*
@@ -165,6 +176,37 @@ def _bot_update_confirm_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("❌ Annuler", callback_data="menu:admin"),
         ],
     ])
+
+
+def _shell_panel_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Quitter shell", callback_data="shell:exit")]]
+    )
+
+
+def _shell_closed_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("↩️ Retour menu admin", callback_data="menu:admin")]]
+    )
+
+
+def _render_shell_panel(cwd: str, command: str | None, output: str | None) -> str:
+    """Render the live shell-mode panel as HTML."""
+    parts = [
+        "🟢 <b>SHELL ACTIF</b>",
+        f"📁 <code>{html_escape(cwd)}</code>",
+        "",
+    ]
+    if command is None and output is None:
+        parts.append("<i>Envoie une commande…</i>")
+    else:
+        if command is not None:
+            parts.append(f"<b>$</b> <code>{html_escape(command)}</code>")
+        if output is not None and output != "":
+            parts.append(f"<pre>{html_escape(output)}</pre>")
+        elif command is not None:
+            parts.append("<i>(pas de sortie)</i>")
+    return "\n".join(parts)
 
 
 def _projects_list_markup(projects: list[dict], statuses: dict[str, bool]) -> InlineKeyboardMarkup:
@@ -655,6 +697,33 @@ def build_app(cfg: Config) -> Application:
 
         if data == "wiz:cancel":
             await _wizard_finish(update, ctx)
+            return
+
+        if data == "admin:shell:enter":
+            user_id = update.effective_user.id
+            chat_id = update.effective_chat.id
+            msg = query.message
+            text = _render_shell_panel(BOT_ROOT, command=None, output=None)
+            await msg.edit_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_shell_panel_markup(),
+            )
+            shell_sessions.start(
+                user_id=user_id,
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                cwd=BOT_ROOT,
+            )
+            return
+
+        if data == "shell:exit":
+            user_id = update.effective_user.id
+            shell_sessions.end(user_id)
+            await query.message.edit_text(
+                "🔴 Shell fermé.",
+                reply_markup=_shell_closed_markup(),
+            )
             return
 
         parts = data.split(":", 2)
