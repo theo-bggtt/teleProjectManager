@@ -704,11 +704,15 @@ def build_app(cfg: Config) -> Application:
             chat_id = update.effective_chat.id
             msg = query.message
             text = _render_shell_panel(BOT_ROOT, command=None, output=None)
-            await msg.edit_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=_shell_panel_markup(),
-            )
+            try:
+                await msg.edit_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_shell_panel_markup(),
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
             shell_sessions.start(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -720,10 +724,15 @@ def build_app(cfg: Config) -> Application:
         if data == "shell:exit":
             user_id = update.effective_user.id
             shell_sessions.end(user_id)
-            await query.message.edit_text(
-                "🔴 Shell fermé.",
-                reply_markup=_shell_closed_markup(),
-            )
+            try:
+                await query.message.edit_text(
+                    "🔴 Shell fermé.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_shell_closed_markup(),
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
             return
 
         parts = data.split(":", 2)
