@@ -35,6 +35,7 @@ from .files import FileManager, PathEscapeError
 from .runner import make_runner
 from .shell import ShellRunner
 from .trading import register_trading
+from .scheduler import register_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,7 @@ def _main_menu_markup(trading_enabled: bool = False) -> InlineKeyboardMarkup:
         InlineKeyboardButton("📂 Projets", callback_data="menu:projects"),
         InlineKeyboardButton("🚀 Actions", callback_data="menu:actions"),
     ]]
+    rows.append([InlineKeyboardButton("⏰ Planifié", callback_data="sched:list")])
     if trading_enabled:
         rows.append([InlineKeyboardButton("📈 Trading", callback_data="trd:home")])
     rows.append([
@@ -134,8 +136,12 @@ def _main_menu_markup(trading_enabled: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _admin_menu_markup() -> InlineKeyboardMarkup:
+def _admin_menu_markup(notifications_enabled: bool = True) -> InlineKeyboardMarkup:
+    notifs_label = (
+        "🔔 Notifs : ON" if notifications_enabled else "🔕 Notifs : OFF"
+    )
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(notifs_label, callback_data="bot:notifs")],
         [InlineKeyboardButton("🔄 Redémarrer le bot", callback_data="bot:restart")],
         [InlineKeyboardButton("📥 Update bot", callback_data="bot:update")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
@@ -309,6 +315,10 @@ def build_app(cfg: Config) -> Application:
     shell = ShellRunner(timeout=cfg.shell_timeout)
     auth = restricted(cfg.allowed_user_ids)
     trading_enabled = bool(cfg.trading and cfg.trading.enabled)
+
+    # Populated at the end of build_app once register_scheduler runs.
+    # Wrapped in a dict so closures can read the latest value after init.
+    scheduler_db_holder: dict = {}
 
     # ─── /help ────────────────────────────────────────────────────────────
     @auth
@@ -516,9 +526,13 @@ def build_app(cfg: Config) -> Application:
         )
 
     def _wizard_markup(extra_rows: list[list[InlineKeyboardButton]] | None = None) -> InlineKeyboardMarkup:
-        """Main-menu buttons + optional extra rows + Cancel row."""
-        base = _main_menu_markup(trading_enabled).inline_keyboard
-        rows: list[list[InlineKeyboardButton]] = [list(r) for r in base]
+        """Optional extra rows + Cancel row.
+
+        Main-menu buttons are intentionally omitted while a wizard is awaiting input —
+        clicking e.g. *Projets* mid-wizard would be nonsensical. Callers pass step-specific
+        buttons (project picker, ⏭️ Passer, etc.) via ``extra_rows``.
+        """
+        rows: list[list[InlineKeyboardButton]] = []
         if extra_rows:
             rows.extend(extra_rows)
         rows.append([InlineKeyboardButton("❌ Annuler", callback_data="wiz:cancel")])
@@ -573,6 +587,7 @@ def build_app(cfg: Config) -> Application:
             "addact_name", "addact_command", "addact_cwd", "addact_mode",
             "cfg_project",
             "shell_project",
+            "sched",
         ):
             ctx.user_data.pop(k, None)
         text = "*Menu principal*\nChoisis une action :"
@@ -668,12 +683,28 @@ def build_app(cfg: Config) -> Application:
                 await query.edit_message_text(
                     "*⚙️ Admin*\nOpérations sur le bot lui-même :",
                     parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=_admin_menu_markup(),
+                    reply_markup=_admin_menu_markup(
+                        scheduler_db_holder["sdb"].get_notifications_enabled()
+                        if scheduler_db_holder.get("sdb")
+                        else True
+                    ),
                 )
             return
 
         if ns == "bot":
             target = parts[1] if len(parts) > 1 else ""
+            if target == "notifs":
+                sdb = scheduler_db_holder.get("sdb")
+                if sdb is not None:
+                    sdb.set_notifications_enabled(not sdb.get_notifications_enabled())
+                await query.edit_message_text(
+                    "*⚙️ Admin*\nOpérations sur le bot lui-même :",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_admin_menu_markup(
+                        sdb.get_notifications_enabled() if sdb else True
+                    ),
+                )
+                return
             if target == "restart":
                 await query.edit_message_text(
                     "⚠️ *Redémarrer le bot ?*\n"
@@ -736,7 +767,11 @@ def build_app(cfg: Config) -> Application:
                         f"❌ *Échec du git pull* (code {rc})\n```\n{out}\n```\n"
                         "Le bot n'a pas été redémarré.",
                         parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=_admin_menu_markup(),
+                        reply_markup=_admin_menu_markup(
+                            scheduler_db_holder["sdb"].get_notifications_enabled()
+                            if scheduler_db_holder.get("sdb")
+                            else True
+                        ),
                     )
                     return
                 await query.edit_message_text(
@@ -1126,6 +1161,31 @@ def build_app(cfg: Config) -> Application:
             lines.append(f"{icon} *{a['name']}* — `{a['command']}`")
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
+    async def _run_action_by_name(name: str) -> tuple[int, str]:
+        """Execute a saved Action by name. Returns (rc, output).
+
+        - oneshot mode: runs via shell, returns (returncode, merged stdout/stderr).
+        - managed mode: runs via runner.start; returns (0, msg) on success,
+          (1, msg) on failure. There is no captured output for managed Actions.
+        - Unknown action: returns (1, "action not found: <name>").
+
+        Notes:
+          * Does NOT honour require_confirm — confirmation is a UI concern; the
+            scheduler always proceeds.
+        """
+        action = db.get_action(name)
+        if not action:
+            return 1, f"action not found: {name}"
+        mode = action.get("mode", "oneshot")
+        cwd = action.get("cwd") or None
+        if mode == "managed":
+            ok, msg = await runner.start(
+                _action_runner_key(name), action["command"], cwd or str(Path.cwd()),
+            )
+            return (0 if ok else 1), msg
+        rc, out = await shell.run(action["command"], cwd)
+        return rc, out
+
     @auth
     async def cmd_runaction(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not ctx.args:
@@ -1148,12 +1208,9 @@ def build_app(cfg: Config) -> Application:
             )
             return
         mode = action.get("mode", "oneshot")
-        cwd = action.get("cwd") or None
         if mode == "managed":
-            ok, msg = await runner.start(
-                _action_runner_key(name), action["command"], cwd or str(Path.cwd()),
-            )
-            prefix = "▶️" if ok else "⚠️"
+            rc, msg = await _run_action_by_name(name)
+            prefix = "▶️" if rc == 0 else "⚠️"
             await update.message.reply_text(
                 f"{prefix} `{name}` : {msg}", parse_mode=ParseMode.MARKDOWN,
             )
@@ -1161,7 +1218,7 @@ def build_app(cfg: Config) -> Application:
         await update.message.reply_text(
             f"⏳ Exécution de `{name}`…", parse_mode=ParseMode.MARKDOWN,
         )
-        rc, out = await shell.run(action["command"], cwd)
+        rc, out = await _run_action_by_name(name)
         await _send_text_or_file(
             update, out or "(aucune sortie)", f"{name}-output.txt",
             header=f"{name} — exit {rc}",
@@ -1603,7 +1660,7 @@ def build_app(cfg: Config) -> Application:
         Cleans state and lets on_callback handle the navigation by editing the same message."""
         ctx.user_data.pop("wizard_msg_id", None)
         ctx.user_data.pop("wizard_chat_id", None)
-        for k in ("add_name", "addact_name", "addact_command", "addact_cwd", "addact_mode", "cfg_project", "shell_project"):
+        for k in ("add_name", "addact_name", "addact_command", "addact_cwd", "addact_mode", "cfg_project", "shell_project", "sched"):
             ctx.user_data.pop(k, None)
         await on_callback(update, ctx)
         return ConversationHandler.END
@@ -1715,6 +1772,7 @@ def build_app(cfg: Config) -> Application:
             BotCommand("addaction", "Create a new action"),
             BotCommand("runaction", "Run an action by name"),
             BotCommand("delaction", "Delete an action"),
+            BotCommand("scheduled", "List/manage scheduled tasks"),
             BotCommand("remove", "Remove project"),
             BotCommand("help", "Show help"),
         ]
@@ -1764,6 +1822,31 @@ def build_app(cfg: Config) -> Application:
         wizard_step=_wizard_step,
         wizard_finish=_wizard_finish,
         wizard_escape=_wizard_escape,
+    )
+
+    class _ProjectOps:
+        @staticmethod
+        async def start(name: str) -> tuple[bool, str]:
+            proj = db.get_project(name)
+            if not proj or not proj.get("start_command"):
+                return False, "project not configured"
+            return await runner.start(name, proj["start_command"], proj["path"])
+
+        @staticmethod
+        async def stop(name: str) -> bool:
+            return await _stop_project(name)
+
+        @staticmethod
+        async def restart(name: str) -> tuple[bool, str]:
+            return await _restart_project(name)
+
+    scheduler_db_holder["sdb"] = register_scheduler(
+        app, cfg, db,
+        wizard_step=_wizard_step,
+        wizard_finish=_wizard_finish,
+        wizard_escape=_wizard_escape,
+        run_action=_run_action_by_name,
+        project_ops=_ProjectOps,
     )
 
     return app
