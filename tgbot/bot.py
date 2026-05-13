@@ -526,9 +526,13 @@ def build_app(cfg: Config) -> Application:
         )
 
     def _wizard_markup(extra_rows: list[list[InlineKeyboardButton]] | None = None) -> InlineKeyboardMarkup:
-        """Main-menu buttons + optional extra rows + Cancel row."""
-        base = _main_menu_markup(trading_enabled).inline_keyboard
-        rows: list[list[InlineKeyboardButton]] = [list(r) for r in base]
+        """Optional extra rows + Cancel row.
+
+        Main-menu buttons are intentionally omitted while a wizard is awaiting input —
+        clicking e.g. *Projets* mid-wizard would be nonsensical. Callers pass step-specific
+        buttons (project picker, ⏭️ Passer, etc.) via ``extra_rows``.
+        """
+        rows: list[list[InlineKeyboardButton]] = []
         if extra_rows:
             rows.extend(extra_rows)
         rows.append([InlineKeyboardButton("❌ Annuler", callback_data="wiz:cancel")])
