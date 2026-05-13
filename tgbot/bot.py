@@ -142,6 +142,7 @@ def _admin_menu_markup(notifications_enabled: bool = True) -> InlineKeyboardMark
     )
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(notifs_label, callback_data="bot:notifs")],
+        [InlineKeyboardButton("💻 Shell", callback_data="admin:shell:enter")],
         [InlineKeyboardButton("🔄 Redémarrer le bot", callback_data="bot:restart")],
         [InlineKeyboardButton("📥 Update bot", callback_data="bot:update")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
