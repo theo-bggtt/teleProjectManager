@@ -35,6 +35,7 @@ from .files import FileManager, PathEscapeError
 from .runner import make_runner
 from .shell import ShellRunner
 from .trading import register_trading
+from .scheduler import register_scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,7 @@ def _main_menu_markup(trading_enabled: bool = False) -> InlineKeyboardMarkup:
         InlineKeyboardButton("📂 Projets", callback_data="menu:projects"),
         InlineKeyboardButton("🚀 Actions", callback_data="menu:actions"),
     ]]
+    rows.append([InlineKeyboardButton("⏰ Planifié", callback_data="menu:scheduled")])
     if trading_enabled:
         rows.append([InlineKeyboardButton("📈 Trading", callback_data="trd:home")])
     rows.append([
@@ -134,8 +136,12 @@ def _main_menu_markup(trading_enabled: bool = False) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def _admin_menu_markup() -> InlineKeyboardMarkup:
+def _admin_menu_markup(notifications_enabled: bool = True) -> InlineKeyboardMarkup:
+    notifs_label = (
+        "🔔 Notifs : ON" if notifications_enabled else "🔕 Notifs : OFF"
+    )
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton(notifs_label, callback_data="bot:notifs")],
         [InlineKeyboardButton("🔄 Redémarrer le bot", callback_data="bot:restart")],
         [InlineKeyboardButton("📥 Update bot", callback_data="bot:update")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
@@ -309,6 +315,10 @@ def build_app(cfg: Config) -> Application:
     shell = ShellRunner(timeout=cfg.shell_timeout)
     auth = restricted(cfg.allowed_user_ids)
     trading_enabled = bool(cfg.trading and cfg.trading.enabled)
+
+    # Populated at the end of build_app once register_scheduler runs.
+    # Wrapped in a dict so closures can read the latest value after init.
+    scheduler_db_holder: dict = {}
 
     # ─── /help ────────────────────────────────────────────────────────────
     @auth
@@ -668,12 +678,50 @@ def build_app(cfg: Config) -> Application:
                 await query.edit_message_text(
                     "*⚙️ Admin*\nOpérations sur le bot lui-même :",
                     parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=_admin_menu_markup(),
+                    reply_markup=_admin_menu_markup(
+                        scheduler_db_holder["sdb"].get_notifications_enabled()
+                        if scheduler_db_holder.get("sdb")
+                        else True
+                    ),
+                )
+            elif target == "scheduled":
+                sdb = scheduler_db_holder.get("sdb")
+                if sdb is None:
+                    await query.edit_message_text(
+                        "Scheduler indisponible.",
+                        reply_markup=_main_menu_markup(trading_enabled),
+                    )
+                    return
+                from .scheduler.triggers import describe_trigger as _desc
+                tasks = sdb.list_tasks()
+                rows: list[list[InlineKeyboardButton]] = []
+                for t in tasks:
+                    check = "✓" if t["enabled"] else "✗"
+                    label = f"{check} {t['name']} — {_desc(t['trigger_kind'], t['trigger_spec'])}"
+                    rows.append([InlineKeyboardButton(label, callback_data=f"sched:card:{t['id']}")])
+                rows.append([InlineKeyboardButton("➕ Nouvelle", callback_data="sched:new")])
+                rows.append([InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")])
+                text = f"*Tâches planifiées ({len(tasks)})*" if tasks else "*Tâches planifiées*\nAucune tâche."
+                await query.edit_message_text(
+                    text, parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=InlineKeyboardMarkup(rows),
                 )
             return
 
         if ns == "bot":
             target = parts[1] if len(parts) > 1 else ""
+            if target == "notifs":
+                sdb = scheduler_db_holder.get("sdb")
+                if sdb is not None:
+                    sdb.set_notifications_enabled(not sdb.get_notifications_enabled())
+                await query.edit_message_text(
+                    "*⚙️ Admin*\nOpérations sur le bot lui-même :",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_admin_menu_markup(
+                        sdb.get_notifications_enabled() if sdb else True
+                    ),
+                )
+                return
             if target == "restart":
                 await query.edit_message_text(
                     "⚠️ *Redémarrer le bot ?*\n"
@@ -736,7 +784,11 @@ def build_app(cfg: Config) -> Application:
                         f"❌ *Échec du git pull* (code {rc})\n```\n{out}\n```\n"
                         "Le bot n'a pas été redémarré.",
                         parse_mode=ParseMode.MARKDOWN,
-                        reply_markup=_admin_menu_markup(),
+                        reply_markup=_admin_menu_markup(
+                            scheduler_db_holder["sdb"].get_notifications_enabled()
+                            if scheduler_db_holder.get("sdb")
+                            else True
+                        ),
                     )
                     return
                 await query.edit_message_text(
@@ -1625,7 +1677,7 @@ def build_app(cfg: Config) -> Application:
         Cleans state and lets on_callback handle the navigation by editing the same message."""
         ctx.user_data.pop("wizard_msg_id", None)
         ctx.user_data.pop("wizard_chat_id", None)
-        for k in ("add_name", "addact_name", "addact_command", "addact_cwd", "addact_mode", "cfg_project", "shell_project"):
+        for k in ("add_name", "addact_name", "addact_command", "addact_cwd", "addact_mode", "cfg_project", "shell_project", "sched"):
             ctx.user_data.pop(k, None)
         await on_callback(update, ctx)
         return ConversationHandler.END
@@ -1737,6 +1789,7 @@ def build_app(cfg: Config) -> Application:
             BotCommand("addaction", "Create a new action"),
             BotCommand("runaction", "Run an action by name"),
             BotCommand("delaction", "Delete an action"),
+            BotCommand("scheduled", "List/manage scheduled tasks"),
             BotCommand("remove", "Remove project"),
             BotCommand("help", "Show help"),
         ]
@@ -1786,6 +1839,31 @@ def build_app(cfg: Config) -> Application:
         wizard_step=_wizard_step,
         wizard_finish=_wizard_finish,
         wizard_escape=_wizard_escape,
+    )
+
+    class _ProjectOps:
+        @staticmethod
+        async def start(name: str) -> tuple[bool, str]:
+            proj = db.get_project(name)
+            if not proj or not proj.get("start_command"):
+                return False, "project not configured"
+            return await runner.start(name, proj["start_command"], proj["path"])
+
+        @staticmethod
+        async def stop(name: str) -> bool:
+            return await _stop_project(name)
+
+        @staticmethod
+        async def restart(name: str) -> tuple[bool, str]:
+            return await _restart_project(name)
+
+    scheduler_db_holder["sdb"] = register_scheduler(
+        app, cfg, db,
+        wizard_step=_wizard_step,
+        wizard_finish=_wizard_finish,
+        wizard_escape=_wizard_escape,
+        run_action=_run_action_by_name,
+        project_ops=_ProjectOps,
     )
 
     return app
