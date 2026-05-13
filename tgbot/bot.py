@@ -2,6 +2,7 @@
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import os
 import subprocess
@@ -136,6 +137,7 @@ def _main_menu_markup(trading_enabled: bool = False) -> InlineKeyboardMarkup:
 def _admin_menu_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄 Redémarrer le bot", callback_data="bot:restart")],
+        [InlineKeyboardButton("📥 Update bot", callback_data="bot:update")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
     ])
 
@@ -144,6 +146,15 @@ def _bot_restart_confirm_markup() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton("✅ Oui, redémarrer", callback_data="bot:restart_do"),
+            InlineKeyboardButton("❌ Annuler", callback_data="menu:admin"),
+        ],
+    ])
+
+
+def _bot_update_confirm_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Oui, update + restart", callback_data="bot:update_do"),
             InlineKeyboardButton("❌ Annuler", callback_data="menu:admin"),
         ],
     ])
@@ -676,9 +687,70 @@ def build_app(cfg: Config) -> Application:
                     "🔄 *Redémarrage en cours…*\nLe bot sera de nouveau joignable dans quelques secondes.",
                     parse_mode=ParseMode.MARKDOWN,
                 )
+                # Persist the notice coordinates so the next process can delete
+                # this message and post a fresh main menu on startup.
+                try:
+                    notice_path = cfg.data_dir / ".restart_notice.json"
+                    notice_path.write_text(json.dumps({
+                        "chat_id": query.message.chat_id,
+                        "message_id": query.message.message_id,
+                    }))
+                except Exception as e:
+                    logger.warning("Could not write restart notice: %s", e)
                 logger.warning("Bot restart requested by user %s", update.effective_user.id)
                 # Schedule the re-exec after the current callback finishes so the
                 # confirmation message has time to be flushed to Telegram.
+                asyncio.get_running_loop().call_later(0.8, _exec_restart)
+            elif target == "update":
+                await query.edit_message_text(
+                    "⚠️ *Mettre à jour le bot ?*\n"
+                    "`git pull` sera exécuté dans le dossier du bot, puis le "
+                    "processus redémarrera.",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_bot_update_confirm_markup(),
+                )
+            elif target == "update_do":
+                repo_dir = Path(__file__).resolve().parent.parent
+                await query.edit_message_text(
+                    f"📥 *Mise à jour…*\n`git pull` dans `{repo_dir}`",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.warning("Bot update requested by user %s", update.effective_user.id)
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "pull", "--ff-only",
+                        cwd=str(repo_dir),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    raw, _ = await proc.communicate()
+                    out = (raw.decode("utf-8", errors="replace") or "").strip() or "(aucune sortie)"
+                    rc = proc.returncode
+                except Exception as e:
+                    out, rc = f"Exception: {e}", -1
+                # Truncate so Telegram (4096-char limit) is happy even with backticks.
+                if len(out) > 3500:
+                    out = out[:3500] + "\n…(tronqué)"
+                if rc != 0:
+                    await query.edit_message_text(
+                        f"❌ *Échec du git pull* (code {rc})\n```\n{out}\n```\n"
+                        "Le bot n'a pas été redémarré.",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=_admin_menu_markup(),
+                    )
+                    return
+                await query.edit_message_text(
+                    f"✅ *git pull OK*\n```\n{out}\n```\n🔄 *Redémarrage en cours…*",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                try:
+                    notice_path = cfg.data_dir / ".restart_notice.json"
+                    notice_path.write_text(json.dumps({
+                        "chat_id": query.message.chat_id,
+                        "message_id": query.message.message_id,
+                    }))
+                except Exception as e:
+                    logger.warning("Could not write restart notice: %s", e)
                 asyncio.get_running_loop().call_later(0.8, _exec_restart)
             return
 
@@ -1657,6 +1729,32 @@ def build_app(cfg: Config) -> Application:
                 BotCommand("holdings", "Wallet holdings snapshot"),
             ])
         await application.bot.set_my_commands(commands)
+
+        # If we just restarted via the inline button, delete the "Redémarrage
+        # en cours…" message and post a fresh main menu in the same chat.
+        notice_path = cfg.data_dir / ".restart_notice.json"
+        if notice_path.exists():
+            try:
+                data = json.loads(notice_path.read_text())
+                chat_id = data["chat_id"]
+                message_id = data["message_id"]
+                try:
+                    await application.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                except BadRequest as e:
+                    logger.warning("Could not delete restart notice message: %s", e)
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text="*Menu principal*\nChoisis une action :",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_main_menu_markup(trading_enabled),
+                )
+            except Exception as e:
+                logger.warning("Failed to handle restart notice: %s", e)
+            finally:
+                try:
+                    notice_path.unlink()
+                except OSError:
+                    pass
 
     app.post_init = post_init
 
