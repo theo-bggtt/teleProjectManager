@@ -205,7 +205,10 @@ def register_handlers(
             return
 
         if sub == "toggle" and len(parts) == 3:
-            task_id = int(parts[2])
+            try:
+                task_id = int(parts[2])
+            except ValueError:
+                return
             t = scheduler_db.get_task(task_id)
             if t is None:
                 return
@@ -219,14 +222,20 @@ def register_handlers(
             return
 
         if sub == "run" and len(parts) == 3:
-            task_id = int(parts[2])
+            try:
+                task_id = int(parts[2])
+            except ValueError:
+                return
             await query.edit_message_text("⏳ Exécution…", parse_mode=ParseMode.MARKDOWN)
             await executor.run_task(task_id)
             await _render_card(query, task_id)
             return
 
         if sub == "del" and len(parts) == 3:
-            task_id = int(parts[2])
+            try:
+                task_id = int(parts[2])
+            except ValueError:
+                return
             await query.edit_message_text(
                 "🗑 Supprimer cette tâche planifiée ?",
                 parse_mode=ParseMode.MARKDOWN,
@@ -235,7 +244,10 @@ def register_handlers(
             return
 
         if sub == "dconfirm" and len(parts) == 3:
-            task_id = int(parts[2])
+            try:
+                task_id = int(parts[2])
+            except ValueError:
+                return
             _unschedule(task_id)
             scheduler_db.delete_task(task_id)
             await _render_list(query)
@@ -443,6 +455,11 @@ def register_handlers(
             await wizard_step(update, ctx, "⚠️ Nom vide. Réessaie.")
             return SCHED_NAME
         s = ctx.user_data.get("sched", {})
+        required_keys = ("task_type", "target", "trigger_kind", "trigger_spec")
+        if not all(k in s for k in required_keys):
+            await wizard_step(update, ctx, "⚠️ État du wizard perdu. Recommence depuis le menu.")
+            ctx.user_data.pop("sched", None)
+            return ConversationHandler.END
         task_id = scheduler_db.add_task(
             name=name,
             task_type=s["task_type"],
