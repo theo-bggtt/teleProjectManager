@@ -1,9 +1,12 @@
 """Tests for the root shell mode helpers and session store."""
 
+import os
+
 from tgbot.shell_mode import (
     DEFAULT_TIMEOUT_SECONDS,
     ShellSession,
     ShellSessionStore,
+    resolve_cd,
     strip_ansi,
     truncate_output,
 )
@@ -126,3 +129,54 @@ def test_store_set_cwd_updates_directory():
     store.start(42, 100, 5, "/tmp")
     store.set_cwd(42, "/var/log")
     assert store.get(42).cwd == "/var/log"
+
+
+def test_resolve_cd_absolute_valid(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    result = resolve_cd(str(tmp_path), str(sub), bot_root=str(tmp_path))
+    assert result == str(sub)
+
+
+def test_resolve_cd_relative_valid(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    result = resolve_cd(str(tmp_path), "sub", bot_root=str(tmp_path))
+    assert result == os.path.normpath(str(sub))
+
+
+def test_resolve_cd_dotdot(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    result = resolve_cd(str(sub), "..", bot_root=str(tmp_path))
+    assert result == os.path.normpath(str(tmp_path))
+
+
+def test_resolve_cd_invalid_path_returns_none(tmp_path):
+    result = resolve_cd(str(tmp_path), "does-not-exist", bot_root=str(tmp_path))
+    assert result is None
+
+
+def test_resolve_cd_no_arg_returns_bot_root(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    result = resolve_cd(str(sub), None, bot_root=str(tmp_path))
+    assert result == str(tmp_path)
+
+
+def test_resolve_cd_empty_arg_returns_bot_root(tmp_path):
+    result = resolve_cd(str(tmp_path), "", bot_root=str(tmp_path))
+    assert result == str(tmp_path)
+
+
+def test_resolve_cd_bot_root_missing_returns_none(tmp_path):
+    missing = str(tmp_path / "nope")
+    result = resolve_cd(str(tmp_path), None, bot_root=missing)
+    assert result is None
+
+
+def test_resolve_cd_file_not_dir_returns_none(tmp_path):
+    f = tmp_path / "file.txt"
+    f.write_text("hi")
+    result = resolve_cd(str(tmp_path), "file.txt", bot_root=str(tmp_path))
+    assert result is None

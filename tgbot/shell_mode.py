@@ -6,6 +6,7 @@ execute shell commands by sending plain text messages once they have
 entered the mode from the admin menu.
 """
 
+import os
 import re
 import time  # imported as module so tests can monkeypatch time.monotonic
 from dataclasses import dataclass
@@ -101,3 +102,19 @@ class ShellSessionStore:
         self, now: float, ttl: float = DEFAULT_TIMEOUT_SECONDS
     ) -> list[ShellSession]:
         return [s for s in self._sessions.values() if (now - s.last_activity) > ttl]
+
+
+def resolve_cd(current_cwd: str, arg: str | None, *, bot_root: str) -> str | None:
+    """Resolve a `cd` target relative to `current_cwd`.
+
+    Returns the absolute, normalized path on success, or `None` if the
+    target does not exist or is not a directory. `arg` is treated as
+    absolute when it begins with a path separator; otherwise joined to
+    `current_cwd`. An empty or missing `arg` returns `bot_root`.
+    """
+    if not arg:
+        return bot_root if os.path.isdir(bot_root) else None
+    target = arg if os.path.isabs(arg) else os.path.normpath(
+        os.path.join(current_cwd, arg)
+    )
+    return target if os.path.isdir(target) else None
