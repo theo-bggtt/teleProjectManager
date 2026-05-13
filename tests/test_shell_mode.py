@@ -1,9 +1,5 @@
 """Tests for the root shell mode helpers and session store."""
 
-import time
-
-import pytest
-
 from tgbot.shell_mode import strip_ansi, truncate_output
 
 
