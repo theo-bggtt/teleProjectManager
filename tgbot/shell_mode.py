@@ -7,6 +7,8 @@ entered the mode from the admin menu.
 """
 
 import re
+import time
+from dataclasses import dataclass
 
 DEFAULT_TIMEOUT_SECONDS = 600  # 10 minutes
 DEFAULT_OUTPUT_LIMIT = 3500    # leaves room for header and HTML wrapping
@@ -24,3 +26,70 @@ def truncate_output(text: str, limit: int = DEFAULT_OUTPUT_LIMIT) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + "\n… (tronqué)"
+
+
+@dataclass
+class ShellSession:
+    """A live root-shell session for a single Telegram user.
+
+    The `message_id` points at the panel message that is edited in place
+    after each command; `cwd` tracks the navigable working directory and
+    `last_activity` (monotonic seconds) drives the idle timeout.
+    """
+
+    user_id: int
+    chat_id: int
+    message_id: int
+    cwd: str
+    last_activity: float
+
+
+class ShellSessionStore:
+    """In-memory map of `user_id` -> `ShellSession`.
+
+    PTB runs handlers serially per update by default, so a plain dict is
+    safe. If `concurrent_updates` is ever enabled in the application, wrap
+    mutations with an `asyncio.Lock`.
+    """
+
+    def __init__(self) -> None:
+        self._sessions: dict[int, ShellSession] = {}
+
+    def get(self, user_id: int) -> ShellSession | None:
+        return self._sessions.get(user_id)
+
+    def start(
+        self, user_id: int, chat_id: int, message_id: int, cwd: str
+    ) -> ShellSession:
+        session = ShellSession(
+            user_id=user_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            cwd=cwd,
+            last_activity=time.monotonic(),
+        )
+        self._sessions[user_id] = session
+        return session
+
+    def end(self, user_id: int) -> ShellSession | None:
+        return self._sessions.pop(user_id, None)
+
+    def touch(self, user_id: int) -> None:
+        s = self._sessions.get(user_id)
+        if s is not None:
+            s.last_activity = time.monotonic()
+
+    def set_message_id(self, user_id: int, message_id: int) -> None:
+        s = self._sessions.get(user_id)
+        if s is not None:
+            s.message_id = message_id
+
+    def set_cwd(self, user_id: int, cwd: str) -> None:
+        s = self._sessions.get(user_id)
+        if s is not None:
+            s.cwd = cwd
+
+    def expired(
+        self, now: float, ttl: float = DEFAULT_TIMEOUT_SECONDS
+    ) -> list[ShellSession]:
+        return [s for s in self._sessions.values() if (now - s.last_activity) > ttl]
