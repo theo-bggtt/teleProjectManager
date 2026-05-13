@@ -51,7 +51,8 @@ class Executor:
             if task["task_type"] == "action":
                 rc, out = await self.run_action(task["target"])
                 status = "ok" if rc == 0 else "error"
-                detail = (out or "").strip().splitlines()[-1] if out else ""
+                lines = (out or "").strip().splitlines()
+                detail = lines[-1] if lines else ""
             elif task["task_type"] == "project_op":
                 op = task["operation"]
                 target = task["target"]

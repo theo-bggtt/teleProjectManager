@@ -121,3 +121,17 @@ async def test_executor_swallows_internal_exceptions(sdb):
     )
     await ex.run_task(task_id)  # must NOT raise
     assert sdb.get_task(task_id)["last_status"] == "error"
+
+
+async def test_run_action_whitespace_only_output(sdb):
+    """Whitespace-only stdout must not crash detail extraction."""
+    task_id = sdb.add_task(
+        name="t", task_type="action", target="myact", operation=None,
+        trigger_kind="interval", trigger_spec={"minutes": 5},
+    )
+    ex, bot, _, _ = make_executor(sdb, action_out="   \n  \n")
+    await ex.run_task(task_id)
+    # No crash, status is still ok (rc=0 default)
+    assert sdb.get_task(task_id)["last_status"] == "ok"
+    # 2 notifications still sent
+    assert bot.send_message.await_count == 2
