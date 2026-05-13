@@ -102,7 +102,7 @@ def register_handlers(
             [InlineKeyboardButton(toggle, callback_data=f"sched:toggle:{task_id}")],
             [InlineKeyboardButton("▶️ Exécuter maintenant", callback_data=f"sched:run:{task_id}")],
             [InlineKeyboardButton("🗑 Supprimer", callback_data=f"sched:del:{task_id}")],
-            [InlineKeyboardButton("⬅️ Retour", callback_data="menu:scheduled")],
+            [InlineKeyboardButton("⬅️ Retour", callback_data="sched:list")],
         ])
 
     def _confirm_delete_markup(task_id: int) -> InlineKeyboardMarkup:
@@ -251,13 +251,6 @@ def register_handlers(
             _unschedule(task_id)
             scheduler_db.delete_task(task_id)
             await _render_list(query)
-            return
-
-        if sub == "notifs":
-            current = scheduler_db.get_notifications_enabled()
-            scheduler_db.set_notifications_enabled(not current)
-            new_state = "ON" if not current else "OFF"
-            await query.answer(text=f"Notifications {new_state}", show_alert=False)
             return
 
     # ─── wizard (create) ────────────────────────────────────────────────

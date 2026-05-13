@@ -126,7 +126,7 @@ def _main_menu_markup(trading_enabled: bool = False) -> InlineKeyboardMarkup:
         InlineKeyboardButton("📂 Projets", callback_data="menu:projects"),
         InlineKeyboardButton("🚀 Actions", callback_data="menu:actions"),
     ]]
-    rows.append([InlineKeyboardButton("⏰ Planifié", callback_data="menu:scheduled")])
+    rows.append([InlineKeyboardButton("⏰ Planifié", callback_data="sched:list")])
     if trading_enabled:
         rows.append([InlineKeyboardButton("📈 Trading", callback_data="trd:home")])
     rows.append([
@@ -583,6 +583,7 @@ def build_app(cfg: Config) -> Application:
             "addact_name", "addact_command", "addact_cwd", "addact_mode",
             "cfg_project",
             "shell_project",
+            "sched",
         ):
             ctx.user_data.pop(k, None)
         text = "*Menu principal*\nChoisis une action :"
@@ -683,28 +684,6 @@ def build_app(cfg: Config) -> Application:
                         if scheduler_db_holder.get("sdb")
                         else True
                     ),
-                )
-            elif target == "scheduled":
-                sdb = scheduler_db_holder.get("sdb")
-                if sdb is None:
-                    await query.edit_message_text(
-                        "Scheduler indisponible.",
-                        reply_markup=_main_menu_markup(trading_enabled),
-                    )
-                    return
-                from .scheduler.triggers import describe_trigger as _desc
-                tasks = sdb.list_tasks()
-                rows: list[list[InlineKeyboardButton]] = []
-                for t in tasks:
-                    check = "✓" if t["enabled"] else "✗"
-                    label = f"{check} {t['name']} — {_desc(t['trigger_kind'], t['trigger_spec'])}"
-                    rows.append([InlineKeyboardButton(label, callback_data=f"sched:card:{t['id']}")])
-                rows.append([InlineKeyboardButton("➕ Nouvelle", callback_data="sched:new")])
-                rows.append([InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")])
-                text = f"*Tâches planifiées ({len(tasks)})*" if tasks else "*Tâches planifiées*\nAucune tâche."
-                await query.edit_message_text(
-                    text, parse_mode=ParseMode.MARKDOWN,
-                    reply_markup=InlineKeyboardMarkup(rows),
                 )
             return
 
