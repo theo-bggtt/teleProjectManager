@@ -1,6 +1,12 @@
 """Tests for the root shell mode helpers and session store."""
 
-from tgbot.shell_mode import strip_ansi, truncate_output
+from tgbot.shell_mode import (
+    DEFAULT_TIMEOUT_SECONDS,
+    ShellSession,
+    ShellSessionStore,
+    strip_ansi,
+    truncate_output,
+)
 
 
 def test_strip_ansi_color_codes():
@@ -34,9 +40,6 @@ def test_truncate_output_over_limit():
     assert result.startswith("a" * 100)
     assert result.endswith("… (tronqué)")
     assert len(result) == 100 + len("\n… (tronqué)")
-
-
-from tgbot.shell_mode import ShellSession, ShellSessionStore, DEFAULT_TIMEOUT_SECONDS
 
 
 def test_store_start_creates_session():

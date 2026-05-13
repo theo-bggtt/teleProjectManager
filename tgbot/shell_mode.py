@@ -7,7 +7,7 @@ entered the mode from the admin menu.
 """
 
 import re
-import time
+import time  # imported as module so tests can monkeypatch time.monotonic
 from dataclasses import dataclass
 
 DEFAULT_TIMEOUT_SECONDS = 600  # 10 minutes
@@ -61,6 +61,11 @@ class ShellSessionStore:
     def start(
         self, user_id: int, chat_id: int, message_id: int, cwd: str
     ) -> ShellSession:
+        """Create or replace the session for `user_id` and return it.
+
+        Any existing session for the same user is silently discarded,
+        including its `chat_id`, `message_id`, and `cwd`.
+        """
         session = ShellSession(
             user_id=user_id,
             chat_id=chat_id,
@@ -75,16 +80,19 @@ class ShellSessionStore:
         return self._sessions.pop(user_id, None)
 
     def touch(self, user_id: int) -> None:
+        """Refresh the last-activity timestamp. No-op if no session exists."""
         s = self._sessions.get(user_id)
         if s is not None:
             s.last_activity = time.monotonic()
 
     def set_message_id(self, user_id: int, message_id: int) -> None:
+        """Update the panel `message_id`. No-op if no session exists."""
         s = self._sessions.get(user_id)
         if s is not None:
             s.message_id = message_id
 
     def set_cwd(self, user_id: int, cwd: str) -> None:
+        """Update the working directory. No-op if no session exists."""
         s = self._sessions.get(user_id)
         if s is not None:
             s.cwd = cwd
