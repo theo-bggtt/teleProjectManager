@@ -1126,6 +1126,31 @@ def build_app(cfg: Config) -> Application:
             lines.append(f"{icon} *{a['name']}* — `{a['command']}`")
         await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
 
+    async def _run_action_by_name(name: str) -> tuple[int, str]:
+        """Execute a saved Action by name. Returns (rc, output).
+
+        - oneshot mode: runs via shell, returns (returncode, merged stdout/stderr).
+        - managed mode: runs via runner.start; returns (0, msg) on success,
+          (1, msg) on failure. There is no captured output for managed Actions.
+        - Unknown action: returns (1, "action not found: <name>").
+
+        Notes:
+          * Does NOT honour require_confirm — confirmation is a UI concern; the
+            scheduler always proceeds.
+        """
+        action = db.get_action(name)
+        if not action:
+            return 1, f"action not found: {name}"
+        mode = action.get("mode", "oneshot")
+        cwd = action.get("cwd") or None
+        if mode == "managed":
+            ok, msg = await runner.start(
+                _action_runner_key(name), action["command"], cwd or str(Path.cwd()),
+            )
+            return (0 if ok else 1), msg
+        rc, out = await shell.run(action["command"], cwd)
+        return rc, out
+
     @auth
     async def cmd_runaction(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not ctx.args:
@@ -1148,12 +1173,9 @@ def build_app(cfg: Config) -> Application:
             )
             return
         mode = action.get("mode", "oneshot")
-        cwd = action.get("cwd") or None
         if mode == "managed":
-            ok, msg = await runner.start(
-                _action_runner_key(name), action["command"], cwd or str(Path.cwd()),
-            )
-            prefix = "▶️" if ok else "⚠️"
+            rc, msg = await _run_action_by_name(name)
+            prefix = "▶️" if rc == 0 else "⚠️"
             await update.message.reply_text(
                 f"{prefix} `{name}` : {msg}", parse_mode=ParseMode.MARKDOWN,
             )
@@ -1161,7 +1183,7 @@ def build_app(cfg: Config) -> Application:
         await update.message.reply_text(
             f"⏳ Exécution de `{name}`…", parse_mode=ParseMode.MARKDOWN,
         )
-        rc, out = await shell.run(action["command"], cwd)
+        rc, out = await _run_action_by_name(name)
         await _send_text_or_file(
             update, out or "(aucune sortie)", f"{name}-output.txt",
             header=f"{name} — exit {rc}",
