@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS projects (
     name           TEXT PRIMARY KEY,
     path           TEXT NOT NULL,
     start_command  TEXT,
+    stop_command   TEXT,
     entry_file     TEXT,
     env_vars       TEXT DEFAULT '{}',
     created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -31,6 +32,13 @@ class DB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as c:
             c.executescript(SCHEMA)
+            self._migrate(c)
+
+    @staticmethod
+    def _migrate(c: sqlite3.Connection) -> None:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(projects)").fetchall()}
+        if "stop_command" not in cols:
+            c.execute("ALTER TABLE projects ADD COLUMN stop_command TEXT")
 
     @contextmanager
     def _conn(self):

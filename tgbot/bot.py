@@ -1,4 +1,5 @@
 """Telegram bot command handlers."""
+import asyncio
 import base64
 import hashlib
 import logging
@@ -34,11 +35,11 @@ from .trading import register_trading
 logger = logging.getLogger(__name__)
 
 # /config conversation states
-CFG_SELECT, CFG_START_CMD, CFG_ENTRY_FILE = range(3)
+CFG_SELECT, CFG_START_CMD, CFG_STOP_CMD, CFG_ENTRY_FILE = range(4)
 # add-project conversation states (from inline button)
-ADD_NAME, ADD_PATH = range(2, 4)
+ADD_NAME, ADD_PATH = range(4, 6)
 # add-action conversation states
-ADD_A_NAME, ADD_A_COMMAND, ADD_A_CWD, ADD_A_MODE, ADD_A_CONFIRM = range(4, 9)
+ADD_A_NAME, ADD_A_COMMAND, ADD_A_CWD, ADD_A_MODE, ADD_A_CONFIRM = range(6, 11)
 PROJ_SHELL_CMD = 700
 
 # Telegram message limit is ~4096; leave headroom for markdown fences
@@ -274,6 +275,27 @@ def build_app(cfg: Config) -> Application:
             reply_markup=_main_menu_markup(trading_enabled),
         )
 
+    async def _stop_project(name: str) -> bool:
+        """Stop a project: run its stop_command (if any) then kill the tracked process."""
+        proj = db.get_project(name)
+        ran_custom = False
+        if proj and proj.get("stop_command"):
+            try:
+                await shell.run(proj["stop_command"], proj["path"])
+                ran_custom = True
+            except Exception as e:
+                logger.warning("stop_command failed for %s: %s", name, e)
+        killed = await runner.stop(name)
+        return ran_custom or killed
+
+    async def _restart_project(name: str) -> tuple[bool, str]:
+        proj = db.get_project(name)
+        if not proj or not proj.get("start_command"):
+            return False, "Not configured."
+        await _stop_project(name)
+        await asyncio.sleep(0.3)
+        return await runner.start(name, proj["start_command"], proj["path"])
+
     async def _project_card_text(name: str) -> tuple[str, bool] | None:
         proj = db.get_project(name)
         if not proj:
@@ -283,6 +305,7 @@ def build_app(cfg: Config) -> Application:
             f"*{name}*\n"
             f"Path: `{proj['path']}`\n"
             f"Start: `{proj.get('start_command') or '(unset)'}`\n"
+            f"Stop: `{proj.get('stop_command') or '(default kill)'}`\n"
             f"Entry: `{proj.get('entry_file') or '(unset)'}`\n"
             f"Status: {'🟢 running' if running else '⚪ stopped'}"
         )
@@ -687,8 +710,7 @@ def build_app(cfg: Config) -> Application:
         if ns == "cfm" and len(parts) == 3:
             action, name = parts[1], parts[2]
             if action == "del":
-                if await runner.is_running(name):
-                    await runner.stop(name)
+                await _stop_project(name)
                 db.remove_project(name)
                 await _render_projects_list(query)
                 return
@@ -699,10 +721,10 @@ def build_app(cfg: Config) -> Application:
                 )
                 return
             if action == "stop":
-                await runner.stop(name)
+                await _stop_project(name)
             elif action == "restart":
                 if proj.get("start_command"):
-                    await runner.restart(name, proj["start_command"], proj["path"])
+                    await _restart_project(name)
             await _render_project_card(query, name)
             return
 
@@ -1074,8 +1096,7 @@ def build_app(cfg: Config) -> Application:
                                              parse_mode=ParseMode.MARKDOWN)
             return
         name = ctx.args[0]
-        if await runner.is_running(name):
-            await runner.stop(name)
+        await _stop_project(name)
         ok = db.remove_project(name)
         await update.message.reply_text("Removed." if ok else "Not found.")
 
@@ -1201,10 +1222,33 @@ def build_app(cfg: Config) -> Application:
         cmd = update.message.text.strip()
         db.update_project(name, start_command=cmd)
         proj = db.get_project(name)
+        current = proj.get("stop_command") or "(none)"
+        await _wizard_step(
+            update, ctx,
+            f"✅ Start command enregistrée pour *{name}*.\n\n"
+            f"🛑 Commande d'arrêt (actuelle : `{current}`) ?\n"
+            f"Envoie une commande ou `skip` (taskkill/tmux kill par défaut).",
+        )
+        return CFG_STOP_CMD
+
+    async def cfg_stop_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        name = ctx.user_data.get("cfg_project")
+        if not name:
+            await _wizard_step(update, ctx, "⚠️ État perdu, recommence depuis le menu.")
+            return ConversationHandler.END
+        text = update.message.text.strip()
+        if text.lower() == "clear":
+            db.update_project(name, stop_command=None)
+        elif text.lower() != "skip":
+            db.update_project(name, stop_command=text)
+        proj = db.get_project(name)
         current = proj.get("entry_file") or "(none)"
         await _wizard_step(
             update, ctx,
-            f"✅ Commande enregistrée pour *{name}*.\n\n"
             f"📄 Fichier de log d'entrée (actuel : `{current}`) ?\n"
             f"Envoie un nom de fichier ou `skip`.",
         )
@@ -1255,7 +1299,7 @@ def build_app(cfg: Config) -> Application:
             await update.message.reply_text("Usage: `/stop <name>`", parse_mode=ParseMode.MARKDOWN)
             return
         name = ctx.args[0]
-        ok = await runner.stop(name)
+        ok = await _stop_project(name)
         await update.message.reply_text("Stopped." if ok else "Not running.")
 
     @auth
@@ -1263,12 +1307,7 @@ def build_app(cfg: Config) -> Application:
         if not ctx.args:
             await update.message.reply_text("Usage: `/restart <name>`", parse_mode=ParseMode.MARKDOWN)
             return
-        name = ctx.args[0]
-        proj = db.get_project(name)
-        if not proj or not proj.get("start_command"):
-            await update.message.reply_text("Not configured.")
-            return
-        ok, msg = await runner.restart(name, proj["start_command"], proj["path"])
+        ok, msg = await _restart_project(ctx.args[0])
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
     @auth
@@ -1286,6 +1325,7 @@ def build_app(cfg: Config) -> Application:
             f"*{name}*\n"
             f"Path: `{proj['path']}`\n"
             f"Start: `{proj.get('start_command') or '(unset)'}`\n"
+            f"Stop: `{proj.get('stop_command') or '(default kill)'}`\n"
             f"Entry: `{proj.get('entry_file') or '(unset)'}`\n"
             f"Status: {'🟢 running' if running else '⚪ stopped'}",
             parse_mode=ParseMode.MARKDOWN,
@@ -1439,6 +1479,7 @@ def build_app(cfg: Config) -> Application:
         states={
             CFG_SELECT: [CallbackQueryHandler(cfg_select, pattern=r"^cfgsel:")],
             CFG_START_CMD: [MessageHandler(filters.TEXT & ~filters.COMMAND, cfg_start_cmd)],
+            CFG_STOP_CMD: [MessageHandler(filters.TEXT & ~filters.COMMAND, cfg_stop_cmd)],
             CFG_ENTRY_FILE: [MessageHandler(filters.TEXT & ~filters.COMMAND, cfg_entry_file)],
         },
         fallbacks=[
