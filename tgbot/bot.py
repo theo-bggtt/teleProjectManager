@@ -774,8 +774,48 @@ def build_app(cfg: Config) -> Application:
                         ),
                     )
                     return
+                # Install any new/updated dependencies before restarting so the
+                # next process boot doesn't crash on a missing module.
+                req_path = repo_dir / "requirements.txt"
+                pip_out, pip_rc = "(pas de requirements.txt)", 0
+                if req_path.is_file():
+                    await query.edit_message_text(
+                        f"✅ *git pull OK*\n```\n{out}\n```\n"
+                        "📦 *Installation des dépendances…*",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                    try:
+                        pip_proc = await asyncio.create_subprocess_exec(
+                            sys.executable, "-m", "pip", "install",
+                            "-r", str(req_path),
+                            cwd=str(repo_dir),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.STDOUT,
+                        )
+                        pip_raw, _ = await pip_proc.communicate()
+                        pip_out = (pip_raw.decode("utf-8", errors="replace") or "").strip() or "(aucune sortie)"
+                        pip_rc = pip_proc.returncode
+                    except Exception as e:
+                        pip_out, pip_rc = f"Exception: {e}", -1
+                    if len(pip_out) > 2500:
+                        pip_out = pip_out[:2500] + "\n…(tronqué)"
+                if pip_rc != 0:
+                    await query.edit_message_text(
+                        f"✅ *git pull OK*\n```\n{out}\n```\n"
+                        f"❌ *Échec pip install* (code {pip_rc})\n```\n{pip_out}\n```\n"
+                        "Le bot n'a pas été redémarré.",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=_admin_menu_markup(
+                            scheduler_db_holder["sdb"].get_notifications_enabled()
+                            if scheduler_db_holder.get("sdb")
+                            else True
+                        ),
+                    )
+                    return
                 await query.edit_message_text(
-                    f"✅ *git pull OK*\n```\n{out}\n```\n🔄 *Redémarrage en cours…*",
+                    f"✅ *git pull OK*\n```\n{out}\n```\n"
+                    f"📦 *pip install OK*\n```\n{pip_out}\n```\n"
+                    "🔄 *Redémarrage en cours…*",
                     parse_mode=ParseMode.MARKDOWN,
                 )
                 try:
