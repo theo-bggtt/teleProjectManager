@@ -113,8 +113,8 @@ def resolve_cd(current_cwd: str, arg: str | None, *, bot_root: str) -> str | Non
     `current_cwd`. An empty or missing `arg` returns `bot_root`.
     """
     if not arg:
-        return bot_root if os.path.isdir(bot_root) else None
-    target = arg if os.path.isabs(arg) else os.path.normpath(
-        os.path.join(current_cwd, arg)
+        return os.path.normpath(bot_root) if os.path.isdir(bot_root) else None
+    target = os.path.normpath(
+        arg if os.path.isabs(arg) else os.path.join(current_cwd, arg)
     )
     return target if os.path.isdir(target) else None

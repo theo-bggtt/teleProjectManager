@@ -138,6 +138,14 @@ def test_resolve_cd_absolute_valid(tmp_path):
     assert result == str(sub)
 
 
+def test_resolve_cd_absolute_normalizes_trailing_separator(tmp_path):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    messy = str(sub).rstrip(os.sep) + os.sep  # trailing separator
+    result = resolve_cd(str(tmp_path), messy, bot_root=str(tmp_path))
+    assert result == os.path.normpath(str(sub))
+
+
 def test_resolve_cd_relative_valid(tmp_path):
     sub = tmp_path / "sub"
     sub.mkdir()
