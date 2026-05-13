@@ -3,6 +3,9 @@ import asyncio
 import base64
 import hashlib
 import logging
+import os
+import subprocess
+import sys
 from io import BytesIO
 from pathlib import Path
 
@@ -123,8 +126,27 @@ def _main_menu_markup(trading_enabled: bool = False) -> InlineKeyboardMarkup:
     ]]
     if trading_enabled:
         rows.append([InlineKeyboardButton("📈 Trading", callback_data="trd:home")])
-    rows.append([InlineKeyboardButton("❓ Aide", callback_data="menu:help")])
+    rows.append([
+        InlineKeyboardButton("⚙️ Admin", callback_data="menu:admin"),
+        InlineKeyboardButton("❓ Aide", callback_data="menu:help"),
+    ])
     return InlineKeyboardMarkup(rows)
+
+
+def _admin_menu_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Redémarrer le bot", callback_data="bot:restart")],
+        [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
+    ])
+
+
+def _bot_restart_confirm_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Oui, redémarrer", callback_data="bot:restart_do"),
+            InlineKeyboardButton("❌ Annuler", callback_data="menu:admin"),
+        ],
+    ])
 
 
 def _projects_list_markup(projects: list[dict], statuses: dict[str, bool]) -> InlineKeyboardMarkup:
@@ -222,6 +244,22 @@ def _action_confirm_markup(verb: str, name: str) -> InlineKeyboardMarkup:
         ],
     ])
 
+
+
+def _exec_restart() -> None:
+    """Replace the current process image with a fresh `python -m tgbot …` run.
+
+    Works under systemd (PID is preserved, the supervisor sees no death) and
+    in dev (terminal/foreground). On Windows ``os.execv`` does not truly replace
+    the parent, so we spawn detached and force-exit instead.
+    """
+    args = [sys.executable, "-m", "tgbot", *sys.argv[1:]]
+    logger.warning("Re-executing bot: %s", args)
+    if sys.platform == "win32":
+        creationflags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen(args, creationflags=creationflags, close_fds=True)
+        os._exit(0)
+    os.execv(sys.executable, args)
 
 
 def _action_runner_key(name: str) -> str:
@@ -615,6 +653,33 @@ def build_app(cfg: Config) -> Application:
                         [[InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")]]
                     ),
                 )
+            elif target == "admin":
+                await query.edit_message_text(
+                    "*⚙️ Admin*\nOpérations sur le bot lui-même :",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_admin_menu_markup(),
+                )
+            return
+
+        if ns == "bot":
+            target = parts[1] if len(parts) > 1 else ""
+            if target == "restart":
+                await query.edit_message_text(
+                    "⚠️ *Redémarrer le bot ?*\n"
+                    "Le processus va se relancer. Les projets gérés par tmux/runner "
+                    "continuent de tourner indépendamment.",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_bot_restart_confirm_markup(),
+                )
+            elif target == "restart_do":
+                await query.edit_message_text(
+                    "🔄 *Redémarrage en cours…*\nLe bot sera de nouveau joignable dans quelques secondes.",
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                logger.warning("Bot restart requested by user %s", update.effective_user.id)
+                # Schedule the re-exec after the current callback finishes so the
+                # confirmation message has time to be flushed to Telegram.
+                asyncio.get_running_loop().call_later(0.8, _exec_restart)
             return
 
         if ns == "proj" and len(parts) >= 2 and parts[1] in ("files", "fget", "fpg"):
