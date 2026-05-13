@@ -6,8 +6,6 @@ execute shell commands by sending plain text messages once they have
 entered the mode from the admin menu.
 """
 
-from __future__ import annotations
-
 import re
 
 DEFAULT_TIMEOUT_SECONDS = 600  # 10 minutes
