@@ -21,6 +21,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -61,6 +62,7 @@ PAGE_SIZE = 10
 
 BOT_ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 shell_sessions = ShellSessionStore()
+_shell_runner: ShellRunner | None = None
 
 
 HELP_TEXT = """*Telegram Project Manager*
@@ -209,6 +211,97 @@ def _render_shell_panel(cwd: str, command: str | None, output: str | None) -> st
     return "\n".join(parts)
 
 
+async def _edit_shell_panel(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    session: ShellSession,
+    *,
+    command: str | None,
+    output: str | None,
+) -> None:
+    """Edit the shell panel message in place.
+
+    Falls back to sending a new message and updating `session.message_id`
+    if the original cannot be edited (e.g. message >48h old).
+    """
+    text = _render_shell_panel(session.cwd, command=command, output=output)
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=session.chat_id,
+            message_id=session.message_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_shell_panel_markup(),
+        )
+    except BadRequest as e:
+        if "not modified" in str(e).lower():
+            return
+        # Original message is no longer editable — send a fresh panel.
+        sent = await ctx.bot.send_message(
+            chat_id=session.chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_shell_panel_markup(),
+        )
+        shell_sessions.set_message_id(session.user_id, sent.message_id)
+
+
+async def on_shell_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Execute incoming text as a shell command when the user is in shell mode.
+
+    Registered in group=-1. If the user has no active shell session, returns
+    immediately so the message propagates to lower-priority handlers
+    (wizards, etc.). Otherwise raises ApplicationHandlerStop to prevent
+    propagation.
+    """
+    user_id = update.effective_user.id
+    session = shell_sessions.get(user_id)
+    if session is None:
+        return  # not in shell mode → let other handlers run
+
+    command = (update.message.text or "").strip()
+    if not command:
+        raise ApplicationHandlerStop
+
+    shell_sessions.touch(user_id)
+
+    # Intercept `cd` so cwd persists between commands.
+    if command == "cd" or command.startswith("cd "):
+        arg = command[3:].strip() if command.startswith("cd ") else None
+        new_cwd = resolve_cd(session.cwd, arg, bot_root=BOT_ROOT)
+        if new_cwd is None:
+            display = arg if arg else ""
+            await _edit_shell_panel(
+                ctx,
+                session,
+                command=command,
+                output=f"cd: {display}: dossier introuvable",
+            )
+        else:
+            shell_sessions.set_cwd(user_id, new_cwd)
+            await _edit_shell_panel(
+                ctx,
+                shell_sessions.get(user_id),
+                command=command,
+                output=None,
+            )
+        raise ApplicationHandlerStop
+
+    # Real command: run through the existing ShellRunner.
+    assert _shell_runner is not None, "ShellRunner not initialized"
+    rc, out = await _shell_runner.run(command, cwd=session.cwd)
+    cleaned = strip_ansi(out)
+    truncated = truncate_output(cleaned)
+    suffix = "" if rc == 0 else f"\n[exit {rc}]"
+    panel_output = (truncated + suffix) if truncated else suffix.lstrip()
+    await _edit_shell_panel(
+        ctx,
+        session,
+        command=command,
+        output=panel_output,
+    )
+    raise ApplicationHandlerStop
+
+
 def _projects_list_markup(projects: list[dict], statuses: dict[str, bool]) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton("➕ Ajouter un projet", callback_data="menu:add")]]
     for p in projects:
@@ -355,7 +448,9 @@ def build_app(cfg: Config) -> Application:
     db = DB(cfg.data_dir / "projects.db")
     runner = make_runner(cfg.data_dir / "logs")
     files_mgr = FileManager(cfg.data_dir / "backups")
-    shell = ShellRunner(timeout=cfg.shell_timeout)
+    global _shell_runner
+    _shell_runner = ShellRunner(timeout=cfg.shell_timeout)
+    shell = _shell_runner  # keep the existing per-project /shell working
     auth = restricted(cfg.allowed_user_ids)
     trading_enabled = bool(cfg.trading and cfg.trading.enabled)
 
@@ -1830,6 +1925,13 @@ def build_app(cfg: Config) -> Application:
         ],
     )
     app.add_handler(proj_shell_conv)
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            auth(on_shell_message),
+        ),
+        group=-1,
+    )
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_error_handler(on_error)
 
