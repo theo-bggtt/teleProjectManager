@@ -277,6 +277,11 @@ async def on_shell_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> No
     if session is None:
         return  # not in shell mode → let other handlers run
 
+    try:
+        await update.message.delete()
+    except Exception:
+        pass  # missing perms or already gone: continue with the command
+
     command = (update.message.text or "").strip()
     if not command:
         raise ApplicationHandlerStop
