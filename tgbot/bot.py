@@ -11,6 +11,7 @@ import time
 from html import escape as html_escape
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 
 from telegram import (
     Update,
@@ -46,6 +47,12 @@ from .shell_mode import (
     strip_ansi,
     truncate_output,
 )
+from .macros import (
+    Macro,
+    MacrosDB,
+    is_valid_command as macro_valid_command,
+    is_valid_name as macro_valid_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +62,9 @@ CFG_SELECT, CFG_START_CMD, CFG_STOP_CMD, CFG_ENTRY_FILE = range(4)
 ADD_NAME, ADD_PATH = range(4, 6)
 # add-action conversation states
 ADD_A_NAME, ADD_A_COMMAND, ADD_A_CWD, ADD_A_MODE, ADD_A_CONFIRM = range(6, 11)
+# macro add/edit conversation states
+MACRO_ADD_NAME, MACRO_ADD_CMD, MACRO_ADD_CWD, MACRO_ADD_CONFIRM = range(11, 15)
+MACRO_EDIT_NAME, MACRO_EDIT_CMD, MACRO_EDIT_CWD = range(15, 18)
 PROJ_SHELL_CMD = 700
 
 # Telegram message limit is ~4096; leave headroom for markdown fences
@@ -157,9 +167,99 @@ def _admin_menu_markup(notifications_enabled: bool = True) -> InlineKeyboardMark
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(notifs_label, callback_data="bot:notifs")],
         [InlineKeyboardButton("💻 Shell", callback_data="admin:shell:enter")],
+        [InlineKeyboardButton("🧷 Macros", callback_data="admin:macros:list")],
         [InlineKeyboardButton("🔄 Redémarrer le bot", callback_data="bot:restart")],
         [InlineKeyboardButton("📥 Update bot", callback_data="bot:update")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
+    ])
+
+
+# ─── Macros UI helpers ───────────────────────────────────────────────────
+
+def _macros_list_text(macros: list[Macro]) -> str:
+    if not macros:
+        return "🧷 <b>Macros</b>\n\nAucune macro enregistrée."
+    return (
+        f"🧷 <b>Macros</b> ({len(macros)})\n\n"
+        "Les plus récentes en premier. Clique pour lancer."
+    )
+
+
+def _macros_list_markup(macros: list[Macro]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(m.name, callback_data=f"macro:show:{m.id}")]
+        for m in macros
+    ]
+    rows.append([InlineKeyboardButton("➕ Ajouter", callback_data="macro:add")])
+    rows.append([InlineKeyboardButton("⬅️ Retour", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _macro_show_text(macro: Macro, bot_root: str) -> str:
+    cwd_disp = macro.cwd or bot_root
+    parts = [
+        f"🧷 <b>{html_escape(macro.name)}</b>",
+        f"📁 <code>{html_escape(cwd_disp)}</code>",
+        "",
+        f"<pre>{html_escape(macro.command)}</pre>",
+    ]
+    if macro.last_run_at:
+        parts.append("")
+        parts.append(f"<i>Dernier run : {html_escape(macro.last_run_at)}</i>")
+    return "\n".join(parts)
+
+
+def _macro_show_markup(macro_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("▶️ Run", callback_data=f"macro:exec:{macro_id}"),
+            InlineKeyboardButton("✏️ Edit", callback_data=f"macro:edit:{macro_id}"),
+        ],
+        [
+            InlineKeyboardButton("🗑 Delete", callback_data=f"macro:delask:{macro_id}"),
+            InlineKeyboardButton("⬅️ Liste", callback_data="admin:macros:list"),
+        ],
+    ])
+
+
+def _macro_result_text(macro: Macro, rc: int, output: str, duration_s: float) -> str:
+    icon = "✓" if rc == 0 else "✗"
+    cwd_disp = macro.cwd or "(racine bot)"
+    parts = [
+        f"{icon} <b>{html_escape(macro.name)}</b> "
+        f"(rc={rc} — {duration_s:.1f}s)",
+        f"📁 <code>{html_escape(cwd_disp)}</code>",
+    ]
+    if output:
+        parts.append(f"<pre>{html_escape(output)}</pre>")
+    return "\n".join(parts)
+
+
+def _macro_result_markup(macro_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("▶️ Re-run", callback_data=f"macro:exec:{macro_id}"),
+            InlineKeyboardButton("🧷 Liste", callback_data="admin:macros:list"),
+        ],
+        [InlineKeyboardButton("⬅️ Retour", callback_data=f"macro:show:{macro_id}")],
+    ])
+
+
+def _macro_edit_pick_markup(macro_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Nom", callback_data=f"macro:editfield:{macro_id}:name")],
+        [InlineKeyboardButton("Commande", callback_data=f"macro:editfield:{macro_id}:cmd")],
+        [InlineKeyboardButton("Cwd", callback_data=f"macro:editfield:{macro_id}:cwd")],
+        [InlineKeyboardButton("⬅️ Retour", callback_data=f"macro:show:{macro_id}")],
+    ])
+
+
+def _macro_delask_markup(macro_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Oui", callback_data=f"macro:del:{macro_id}"),
+            InlineKeyboardButton("❌ Non", callback_data=f"macro:show:{macro_id}"),
+        ],
     ])
 
 
@@ -470,6 +570,7 @@ def _files_remember(ctx: ContextTypes.DEFAULT_TYPE, rel_path: str) -> str:
 
 def build_app(cfg: Config) -> Application:
     db = DB(cfg.data_dir / "projects.db")
+    macros_db = MacrosDB(cfg.data_dir / "projects.db")
     runner = make_runner(cfg.data_dir / "logs")
     files_mgr = FileManager(cfg.data_dir / "backups")
     global _shell_runner
@@ -750,6 +851,7 @@ def build_app(cfg: Config) -> Application:
             "cfg_project",
             "shell_project",
             "sched",
+            "macro_name", "macro_cmd", "macro_cwd", "macro_edit_id",
         ):
             ctx.user_data.pop(k, None)
         text = "*Menu principal*\nChoisis une action :"
@@ -1170,6 +1272,52 @@ def build_app(cfg: Config) -> Application:
             if verb == "run":
                 await _execute_action(update, query, action)
                 return
+            return
+
+        if data == "admin:macros:list":
+            await _render_macros_list(query)
+            return
+
+        if ns == "macro" and len(parts) >= 2:
+            verb = parts[1]
+            # macro:show:<id>, macro:exec:<id>, macro:edit:<id>, macro:delask:<id>, macro:del:<id>
+            if verb in ("show", "exec", "edit", "delask", "del") and len(parts) == 3:
+                try:
+                    macro_id = int(parts[2])
+                except ValueError:
+                    return
+                macro = macros_db.get(macro_id)
+                if macro is None:
+                    await query.edit_message_text(
+                        "🧷 Macro introuvable.",
+                        reply_markup=_macros_list_markup([]),
+                    )
+                    return
+                if verb == "show":
+                    await _render_macro_show(query, macro)
+                    return
+                if verb == "exec":
+                    await _execute_macro(query, macro)
+                    return
+                if verb == "edit":
+                    await query.edit_message_text(
+                        f"✏️ Éditer <b>{html_escape(macro.name)}</b>\nQue modifier ?",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=_macro_edit_pick_markup(macro.id),
+                    )
+                    return
+                if verb == "delask":
+                    await query.edit_message_text(
+                        f"🗑 Supprimer <b>{html_escape(macro.name)}</b> ?",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=_macro_delask_markup(macro.id),
+                    )
+                    return
+                if verb == "del":
+                    macros_db.delete(macro_id)
+                    await _render_macros_list(query)
+                    return
+            # macro:editfield:<id>:<field> is handled by the ConversationHandler entry
             return
 
     # ─── add-project flow (triggered by inline button menu:add) ──────────
@@ -1853,12 +2001,313 @@ def build_app(cfg: Config) -> Application:
     # ─── build Application ────────────────────────────────────────────────
     app = Application.builder().token(cfg.bot_token).build()
 
+    # ─── Macros: render helpers, executor, wizard handlers ──────────────
+
+    async def _render_macros_list(query) -> None:
+        macros = macros_db.list()
+        try:
+            await query.edit_message_text(
+                _macros_list_text(macros),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_macros_list_markup(macros),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
+    async def _render_macro_show(query, macro: Macro) -> None:
+        try:
+            await query.edit_message_text(
+                _macro_show_text(macro, BOT_ROOT),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_macro_show_markup(macro.id),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
+    async def _execute_macro(query, macro: Macro) -> None:
+        cwd = macro.cwd or BOT_ROOT
+        try:
+            await query.edit_message_text(
+                f"⏳ <b>{html_escape(macro.name)}</b> en cours…",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("⬅️ Retour", callback_data=f"macro:show:{macro.id}")]]
+                ),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        t0 = time.monotonic()
+        assert _shell_runner is not None, "ShellRunner not initialized"
+        rc, output = await _shell_runner.run(macro.command, cwd=cwd)
+        duration = time.monotonic() - t0
+        macros_db.touch(macro.id)
+        cleaned = truncate_output(strip_ansi(output or ""))
+        text = _macro_result_text(macro, rc, cleaned, duration)
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=_macro_result_markup(macro.id),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+
+    # ─── Macro add wizard ────────────────────────────────────────────────
+
+    @auth
+    async def macro_add_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.callback_query is not None:
+            await update.callback_query.answer()
+        ctx.user_data.pop("macro_name", None)
+        ctx.user_data.pop("macro_cmd", None)
+        ctx.user_data.pop("macro_cwd", None)
+        await _wizard_step(
+            update, ctx,
+            "🧷 *Nouvelle macro*\n\nNom ? (lettres minuscules, chiffres, tirets ; 1–32 caractères)",
+        )
+        return MACRO_ADD_NAME
+
+    async def macro_add_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        name = update.message.text.strip()
+        if not macro_valid_name(name):
+            await _wizard_step(
+                update, ctx,
+                "⚠️ Nom invalide (regex `^[a-z0-9][a-z0-9-]{0,31}$`).\n\nRéessaye.",
+            )
+            return MACRO_ADD_NAME
+        if macros_db.get_by_name(name) is not None:
+            await _wizard_step(
+                update, ctx,
+                f"⚠️ La macro `{name}` existe déjà.\n\nChoisis un autre nom.",
+            )
+            return MACRO_ADD_NAME
+        ctx.user_data["macro_name"] = name
+        await _wizard_step(
+            update, ctx,
+            f"🧷 Macro : *{name}*\n\nCommande shell ? (multi-lignes ok, ≤ 4000 caractères)",
+        )
+        return MACRO_ADD_CMD
+
+    async def macro_add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        cmd = update.message.text or ""
+        if not macro_valid_command(cmd):
+            await _wizard_step(
+                update, ctx,
+                "⚠️ Commande vide ou trop longue (max 4000 caractères).\n\nRéessaye.",
+            )
+            return MACRO_ADD_CMD
+        ctx.user_data["macro_cmd"] = cmd
+        await _wizard_step(
+            update, ctx,
+            "📁 Répertoire de travail ?\n\nEnvoie `.` pour la racine du bot, ou un chemin absolu existant.",
+        )
+        return MACRO_ADD_CWD
+
+    async def macro_add_cwd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        raw = update.message.text.strip()
+        if raw in (".", ""):
+            cwd: Optional[str] = None
+        else:
+            path = Path(raw).expanduser()
+            if not path.is_dir():
+                await _wizard_step(
+                    update, ctx,
+                    f"⚠️ Pas un dossier : `{path}`.\n\nRéessaye, ou envoie `.` pour la racine du bot.",
+                )
+                return MACRO_ADD_CWD
+            cwd = str(path.resolve())
+        ctx.user_data["macro_cwd"] = cwd
+
+        name = ctx.user_data.get("macro_name")
+        cmd = ctx.user_data.get("macro_cmd")
+        if not name or not cmd:
+            await _wizard_step(update, ctx, "⚠️ État perdu, recommence depuis le menu.")
+            return ConversationHandler.END
+
+        preview_cwd = cwd or BOT_ROOT
+        preview = (
+            f"🧷 *Créer la macro* `{name}` ?\n\n"
+            f"📁 `{preview_cwd}`\n\n"
+            f"```\n{cmd}\n```"
+        )
+        await _wizard_step(
+            update, ctx, preview,
+            extra_rows=[[
+                InlineKeyboardButton("✅ Créer", callback_data="macro:addok"),
+                InlineKeyboardButton("❌ Annuler", callback_data="wiz:cancel"),
+            ]],
+        )
+        return MACRO_ADD_CONFIRM
+
+    async def macro_add_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        if query.data != "macro:addok":
+            return MACRO_ADD_CONFIRM
+        name = ctx.user_data.get("macro_name")
+        cmd = ctx.user_data.get("macro_cmd")
+        cwd = ctx.user_data.get("macro_cwd")
+        if not name or not cmd:
+            await query.edit_message_text("⚠️ État perdu, recommence depuis le menu.")
+            return ConversationHandler.END
+        new_id = macros_db.add(name=name, command=cmd, cwd=cwd)
+        ctx.user_data.pop("macro_name", None)
+        ctx.user_data.pop("macro_cmd", None)
+        ctx.user_data.pop("macro_cwd", None)
+        ctx.user_data.pop("wizard_msg_id", None)
+        ctx.user_data.pop("wizard_chat_id", None)
+        if new_id is None:
+            await query.edit_message_text(
+                f"⚠️ La macro `{name}` existe déjà.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=_macros_list_markup(macros_db.list()),
+            )
+            return ConversationHandler.END
+        await _render_macros_list(query)
+        return ConversationHandler.END
+
+    # ─── Macro edit wizard (single field) ────────────────────────────────
+
+    @auth
+    async def macro_edit_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        # data is "macro:editfield:<id>:<field>"
+        parts = query.data.split(":")
+        if len(parts) != 4:
+            return ConversationHandler.END
+        try:
+            macro_id = int(parts[2])
+        except ValueError:
+            return ConversationHandler.END
+        field_name = parts[3]
+        macro = macros_db.get(macro_id)
+        if macro is None:
+            await query.edit_message_text("🧷 Macro introuvable.")
+            return ConversationHandler.END
+        ctx.user_data["macro_edit_id"] = macro_id
+        if field_name == "name":
+            await _wizard_step(
+                update, ctx,
+                f"✏️ Nouveau nom pour *{macro.name}* ?\n\n(lettres minuscules, chiffres, tirets ; 1–32)",
+            )
+            return MACRO_EDIT_NAME
+        if field_name == "cmd":
+            await _wizard_step(
+                update, ctx,
+                f"✏️ Nouvelle commande pour *{macro.name}* ?",
+            )
+            return MACRO_EDIT_CMD
+        if field_name == "cwd":
+            await _wizard_step(
+                update, ctx,
+                f"✏️ Nouveau cwd pour *{macro.name}* ?\n\nEnvoie `.` pour racine bot.",
+            )
+            return MACRO_EDIT_CWD
+        return ConversationHandler.END
+
+    async def _finish_edit(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+                            macro_id: int) -> int:
+        ctx.user_data.pop("macro_edit_id", None)
+        msg_id = ctx.user_data.pop("wizard_msg_id", None)
+        chat_id = ctx.user_data.pop("wizard_chat_id", None)
+        macro = macros_db.get(macro_id)
+        if macro is None or msg_id is None or chat_id is None:
+            return ConversationHandler.END
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=msg_id,
+                text=_macro_show_text(macro, BOT_ROOT),
+                parse_mode=ParseMode.HTML,
+                reply_markup=_macro_show_markup(macro.id),
+            )
+        except BadRequest as e:
+            if "not modified" not in str(e).lower():
+                raise
+        return ConversationHandler.END
+
+    async def macro_edit_name(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        macro_id = ctx.user_data.get("macro_edit_id")
+        if macro_id is None:
+            return ConversationHandler.END
+        new_name = update.message.text.strip()
+        if not macro_valid_name(new_name):
+            await _wizard_step(update, ctx, "⚠️ Nom invalide. Réessaye.")
+            return MACRO_EDIT_NAME
+        if not macros_db.update(macro_id, name=new_name):
+            await _wizard_step(
+                update, ctx, f"⚠️ Nom déjà pris (`{new_name}`). Réessaye."
+            )
+            return MACRO_EDIT_NAME
+        return await _finish_edit(update, ctx, macro_id)
+
+    async def macro_edit_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        macro_id = ctx.user_data.get("macro_edit_id")
+        if macro_id is None:
+            return ConversationHandler.END
+        new_cmd = update.message.text or ""
+        if not macro_valid_command(new_cmd):
+            await _wizard_step(update, ctx, "⚠️ Commande vide ou trop longue.")
+            return MACRO_EDIT_CMD
+        macros_db.update(macro_id, command=new_cmd)
+        return await _finish_edit(update, ctx, macro_id)
+
+    async def macro_edit_cwd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        try:
+            await update.message.delete()
+        except Exception:
+            pass
+        macro_id = ctx.user_data.get("macro_edit_id")
+        if macro_id is None:
+            return ConversationHandler.END
+        raw = update.message.text.strip()
+        if raw in (".", ""):
+            new_cwd: Optional[str] = None
+        else:
+            path = Path(raw).expanduser()
+            if not path.is_dir():
+                await _wizard_step(
+                    update, ctx,
+                    f"⚠️ Pas un dossier : `{path}`. Réessaye, ou envoie `.`.",
+                )
+                return MACRO_EDIT_CWD
+            new_cwd = str(path.resolve())
+        macros_db.update(macro_id, cwd=new_cwd)
+        return await _finish_edit(update, ctx, macro_id)
+
     async def _wizard_escape(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         """Fallback when user clicks a non-wizard button (e.g. main menu) during a wizard.
         Cleans state and lets on_callback handle the navigation by editing the same message."""
         ctx.user_data.pop("wizard_msg_id", None)
         ctx.user_data.pop("wizard_chat_id", None)
-        for k in ("add_name", "addact_name", "addact_command", "addact_cwd", "addact_mode", "cfg_project", "shell_project", "sched"):
+        for k in ("add_name", "addact_name", "addact_command", "addact_cwd", "addact_mode",
+                  "cfg_project", "shell_project", "sched",
+                  "macro_name", "macro_cmd", "macro_cwd", "macro_edit_id"):
             ctx.user_data.pop(k, None)
         await on_callback(update, ctx)
         return ConversationHandler.END
@@ -1916,6 +2365,31 @@ def build_app(cfg: Config) -> Application:
         conversation_timeout=300,
     )
 
+    macro_add_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(macro_add_start, pattern=r"^macro:add$")],
+        states={
+            MACRO_ADD_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, macro_add_name)],
+            MACRO_ADD_CMD: [MessageHandler(filters.TEXT & ~filters.COMMAND, macro_add_cmd)],
+            MACRO_ADD_CWD: [MessageHandler(filters.TEXT & ~filters.COMMAND, macro_add_cwd)],
+            MACRO_ADD_CONFIRM: [CallbackQueryHandler(macro_add_confirm, pattern=r"^macro:addok$")],
+        },
+        fallbacks=[CallbackQueryHandler(_wizard_escape)],
+        conversation_timeout=300,
+    )
+
+    macro_edit_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(macro_edit_start, pattern=r"^macro:editfield:\d+:(name|cmd|cwd)$"),
+        ],
+        states={
+            MACRO_EDIT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, macro_edit_name)],
+            MACRO_EDIT_CMD: [MessageHandler(filters.TEXT & ~filters.COMMAND, macro_edit_cmd)],
+            MACRO_EDIT_CWD: [MessageHandler(filters.TEXT & ~filters.COMMAND, macro_edit_cwd)],
+        },
+        fallbacks=[CallbackQueryHandler(_wizard_escape)],
+        conversation_timeout=300,
+    )
+
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("projects", cmd_projects))
@@ -1936,6 +2410,8 @@ def build_app(cfg: Config) -> Application:
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(add_conv)
     app.add_handler(action_add_conv)
+    app.add_handler(macro_add_conv)
+    app.add_handler(macro_edit_conv)
     proj_shell_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(proj_shell_start, pattern=r"^proj:shell:")],
         states={
