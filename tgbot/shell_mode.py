@@ -110,11 +110,13 @@ def resolve_cd(current_cwd: str, arg: str | None, *, bot_root: str) -> str | Non
     Returns the absolute, normalized path on success, or `None` if the
     target does not exist or is not a directory. `arg` is treated as
     absolute when it begins with a path separator; otherwise joined to
-    `current_cwd`. An empty or missing `arg` returns `bot_root`.
+    `current_cwd`. Tilde (`~`) and `$VAR` expansion are performed.
+    An empty or missing `arg` returns `bot_root`.
     """
     if not arg:
         return os.path.normpath(bot_root) if os.path.isdir(bot_root) else None
+    expanded = os.path.expandvars(os.path.expanduser(arg))
     target = os.path.normpath(
-        arg if os.path.isabs(arg) else os.path.join(current_cwd, arg)
+        expanded if os.path.isabs(expanded) else os.path.join(current_cwd, expanded)
     )
     return target if os.path.isdir(target) else None

@@ -188,3 +188,18 @@ def test_resolve_cd_file_not_dir_returns_none(tmp_path):
     f.write_text("hi")
     result = resolve_cd(str(tmp_path), "file.txt", bot_root=str(tmp_path))
     assert result is None
+
+
+def test_resolve_cd_expands_tilde(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows fallback
+    result = resolve_cd("/somewhere", "~", bot_root=str(tmp_path))
+    assert result == os.path.normpath(str(tmp_path))
+
+
+def test_resolve_cd_expands_env_var(tmp_path, monkeypatch):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    monkeypatch.setenv("MY_DIR", str(sub))
+    result = resolve_cd(str(tmp_path), "$MY_DIR", bot_root=str(tmp_path))
+    assert result == os.path.normpath(str(sub))
