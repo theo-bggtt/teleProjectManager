@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from html import escape as html_escape
 from io import BytesIO
 from pathlib import Path
@@ -243,6 +244,24 @@ async def _edit_shell_panel(
             reply_markup=_shell_panel_markup(),
         )
         shell_sessions.set_message_id(session.user_id, sent.message_id)
+
+
+async def _check_expired_shell_sessions(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job: close sessions idle for more than DEFAULT_TIMEOUT_SECONDS."""
+    from .shell_mode import DEFAULT_TIMEOUT_SECONDS
+
+    now = time.monotonic()
+    for session in shell_sessions.expired(now, ttl=DEFAULT_TIMEOUT_SECONDS):
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=session.chat_id,
+                message_id=session.message_id,
+                text="🔴 Shell fermé (inactivité).",
+                reply_markup=_shell_closed_markup(),
+            )
+        except Exception:
+            pass  # message un-editable: still clean up the session below
+        shell_sessions.end(session.user_id)
 
 
 async def on_shell_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2028,6 +2047,13 @@ def build_app(cfg: Config) -> Application:
         wizard_escape=_wizard_escape,
         run_action=_run_action_by_name,
         project_ops=_ProjectOps,
+    )
+
+    app.job_queue.run_repeating(
+        _check_expired_shell_sessions,
+        interval=60,
+        first=60,
+        name="shell_mode_cleanup",
     )
 
     return app
