@@ -20,6 +20,7 @@ class Config:
     data_dir: Path
     shell_timeout: int
     default_log_lines: int
+    health_mounts: list[str] = field(default_factory=lambda: ["/"])
     trading: TradingConfig | None = None
 
     @classmethod
@@ -42,5 +43,6 @@ class Config:
             data_dir=Path(raw.get("data_dir", "./data")).expanduser().resolve(),
             shell_timeout=int(raw.get("shell_timeout", 30)),
             default_log_lines=int(raw.get("default_log_lines", 50)),
+            health_mounts=list(raw.get("health_mounts", ["/"])),
             trading=trading_cfg,
         )

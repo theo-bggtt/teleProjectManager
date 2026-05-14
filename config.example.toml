@@ -16,6 +16,10 @@ shell_timeout = 30
 # Default number of log lines /logs returns when no count is given.
 default_log_lines = 50
 
+# Mount points surveillés par le healthcheck admin (bouton 🩺 Health Pi).
+# Sur Linux/Pi : ["/"]. Sur Windows en dev : ["C:\\"] ou ["."].
+# health_mounts = ["/"]
+
 # ─────────────────────────────────────────────────────────────────────
 # Optional: trading / on-chain wallet monitoring module.
 #
