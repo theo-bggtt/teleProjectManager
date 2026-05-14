@@ -1,5 +1,7 @@
 python-telegram-bot>=21.0,<22
 APScheduler>=3.10,<4
+# System healthcheck (admin menu):
+psutil>=5.9
 # Trading module (optional — only needed when [trading] is enabled):
 aiohttp>=3.9
 websockets>=12.0

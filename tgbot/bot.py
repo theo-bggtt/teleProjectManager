@@ -46,6 +46,7 @@ from .shell_mode import (
     strip_ansi,
     truncate_output,
 )
+from .healthcheck import collect as health_collect, format_snapshot as health_format
 
 logger = logging.getLogger(__name__)
 
@@ -157,9 +158,17 @@ def _admin_menu_markup(notifications_enabled: bool = True) -> InlineKeyboardMark
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(notifs_label, callback_data="bot:notifs")],
         [InlineKeyboardButton("💻 Shell", callback_data="admin:shell:enter")],
+        [InlineKeyboardButton("🩺 Health Pi", callback_data="admin:health:show")],
         [InlineKeyboardButton("🔄 Redémarrer le bot", callback_data="bot:restart")],
         [InlineKeyboardButton("📥 Update bot", callback_data="bot:update")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
+    ])
+
+
+def _health_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Refresh", callback_data="admin:health:show")],
+        [InlineKeyboardButton("⬅️ Retour", callback_data="menu:admin")],
     ])
 
 
@@ -848,6 +857,20 @@ def build_app(cfg: Config) -> Application:
                     "🔴 Shell fermé.",
                     parse_mode=ParseMode.HTML,
                     reply_markup=_shell_closed_markup(),
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
+            return
+
+        if data == "admin:health:show":
+            snap = health_collect(cfg.health_mounts)
+            text = health_format(snap)
+            try:
+                await query.edit_message_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_health_markup(),
                 )
             except BadRequest as e:
                 if "not modified" not in str(e).lower():
