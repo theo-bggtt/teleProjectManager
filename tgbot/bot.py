@@ -7,6 +7,8 @@ import logging
 import os
 import subprocess
 import sys
+import time
+from html import escape as html_escape
 from io import BytesIO
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
+    ApplicationHandlerStop,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
@@ -36,6 +39,13 @@ from .runner import make_runner
 from .shell import ShellRunner
 from .trading import register_trading
 from .scheduler import register_scheduler
+from .shell_mode import (
+    ShellSession,
+    ShellSessionStore,
+    resolve_cd,
+    strip_ansi,
+    truncate_output,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +60,10 @@ PROJ_SHELL_CMD = 700
 # Telegram message limit is ~4096; leave headroom for markdown fences
 INLINE_TEXT_LIMIT = 3500
 PAGE_SIZE = 10
+
+BOT_ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+shell_sessions = ShellSessionStore()
+_shell_runner: ShellRunner | None = None
 
 
 HELP_TEXT = """*Telegram Project Manager*
@@ -142,6 +156,7 @@ def _admin_menu_markup(notifications_enabled: bool = True) -> InlineKeyboardMark
     )
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(notifs_label, callback_data="bot:notifs")],
+        [InlineKeyboardButton("💻 Shell", callback_data="admin:shell:enter")],
         [InlineKeyboardButton("🔄 Redémarrer le bot", callback_data="bot:restart")],
         [InlineKeyboardButton("📥 Update bot", callback_data="bot:update")],
         [InlineKeyboardButton("⬅️ Retour", callback_data="menu:home")],
@@ -164,6 +179,146 @@ def _bot_update_confirm_markup() -> InlineKeyboardMarkup:
             InlineKeyboardButton("❌ Annuler", callback_data="menu:admin"),
         ],
     ])
+
+
+def _shell_panel_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Quitter shell", callback_data="shell:exit")]]
+    )
+
+
+def _shell_closed_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("↩️ Retour menu admin", callback_data="menu:admin")]]
+    )
+
+
+def _render_shell_panel(cwd: str, command: str | None, output: str | None) -> str:
+    """Render the live shell-mode panel as HTML."""
+    parts = [
+        "🟢 <b>SHELL ACTIF</b>",
+        f"📁 <code>{html_escape(cwd)}</code>",
+        "",
+    ]
+    if command is None and output is None:
+        parts.append("<i>Envoie une commande…</i>")
+    else:
+        if command is not None:
+            parts.append(f"<b>$</b> <code>{html_escape(command)}</code>")
+        if output is not None and output != "":
+            parts.append(f"<pre>{html_escape(output)}</pre>")
+        elif command is not None:
+            parts.append("<i>(pas de sortie)</i>")
+    return "\n".join(parts)
+
+
+async def _edit_shell_panel(
+    ctx: ContextTypes.DEFAULT_TYPE,
+    session: ShellSession,
+    *,
+    command: str | None,
+    output: str | None,
+) -> None:
+    """Edit the shell panel message in place.
+
+    Falls back to sending a new message and updating `session.message_id`
+    if the original cannot be edited (e.g. message >48h old).
+    """
+    text = _render_shell_panel(session.cwd, command=command, output=output)
+    try:
+        await ctx.bot.edit_message_text(
+            chat_id=session.chat_id,
+            message_id=session.message_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_shell_panel_markup(),
+        )
+    except BadRequest as e:
+        if "not modified" in str(e).lower():
+            return
+        # Original message is no longer editable — send a fresh panel.
+        sent = await ctx.bot.send_message(
+            chat_id=session.chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_shell_panel_markup(),
+        )
+        shell_sessions.set_message_id(session.user_id, sent.message_id)
+
+
+async def _check_expired_shell_sessions(ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Job: close sessions idle for more than DEFAULT_TIMEOUT_SECONDS."""
+    from .shell_mode import DEFAULT_TIMEOUT_SECONDS
+
+    now = time.monotonic()
+    for session in shell_sessions.expired(now, ttl=DEFAULT_TIMEOUT_SECONDS):
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=session.chat_id,
+                message_id=session.message_id,
+                text="🔴 Shell fermé (inactivité).",
+                reply_markup=_shell_closed_markup(),
+            )
+        except Exception:
+            pass  # message un-editable: still clean up the session below
+        shell_sessions.end(session.user_id)
+
+
+async def on_shell_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """Execute incoming text as a shell command when the user is in shell mode.
+
+    Registered in group=-1. If the user has no active shell session, returns
+    immediately so the message propagates to lower-priority handlers
+    (wizards, etc.). Otherwise raises ApplicationHandlerStop to prevent
+    propagation.
+    """
+    user_id = update.effective_user.id
+    session = shell_sessions.get(user_id)
+    if session is None:
+        return  # not in shell mode → let other handlers run
+
+    command = (update.message.text or "").strip()
+    if not command:
+        raise ApplicationHandlerStop
+
+    shell_sessions.touch(user_id)
+
+    # Intercept `cd` so cwd persists between commands.
+    if command == "cd" or command.startswith("cd "):
+        arg = command[3:].strip() if command.startswith("cd ") else None
+        new_cwd = resolve_cd(session.cwd, arg, bot_root=BOT_ROOT)
+        if new_cwd is None:
+            display = arg if arg else ""
+            await _edit_shell_panel(
+                ctx,
+                session,
+                command=command,
+                output=f"cd: {display}: dossier introuvable",
+            )
+        else:
+            shell_sessions.set_cwd(user_id, new_cwd)
+            await _edit_shell_panel(
+                ctx,
+                shell_sessions.get(user_id),
+                command=command,
+                output=None,
+            )
+        raise ApplicationHandlerStop
+
+    # Real command: run through the existing ShellRunner.
+    assert _shell_runner is not None, "ShellRunner not initialized"
+    rc, out = await _shell_runner.run(command, cwd=session.cwd)
+    cleaned = strip_ansi(out)
+    truncated = truncate_output(cleaned)
+    suffix = "" if rc == 0 else f"\n[exit {rc}]"
+    panel_output = (truncated + suffix) if truncated else suffix.lstrip()
+    await _edit_shell_panel(
+        ctx,
+        session,
+        command=command,
+        output=panel_output,
+    )
+    raise ApplicationHandlerStop
 
 
 def _projects_list_markup(projects: list[dict], statuses: dict[str, bool]) -> InlineKeyboardMarkup:
@@ -312,7 +467,9 @@ def build_app(cfg: Config) -> Application:
     db = DB(cfg.data_dir / "projects.db")
     runner = make_runner(cfg.data_dir / "logs")
     files_mgr = FileManager(cfg.data_dir / "backups")
-    shell = ShellRunner(timeout=cfg.shell_timeout)
+    global _shell_runner
+    _shell_runner = ShellRunner(timeout=cfg.shell_timeout)
+    shell = _shell_runner  # keep the existing per-project /shell working
     auth = restricted(cfg.allowed_user_ids)
     trading_enabled = bool(cfg.trading and cfg.trading.enabled)
 
@@ -654,6 +811,42 @@ def build_app(cfg: Config) -> Application:
 
         if data == "wiz:cancel":
             await _wizard_finish(update, ctx)
+            return
+
+        if data == "admin:shell:enter":
+            user_id = update.effective_user.id
+            chat_id = update.effective_chat.id
+            msg = query.message
+            text = _render_shell_panel(BOT_ROOT, command=None, output=None)
+            try:
+                await msg.edit_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_shell_panel_markup(),
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
+            shell_sessions.start(
+                user_id=user_id,
+                chat_id=chat_id,
+                message_id=msg.message_id,
+                cwd=BOT_ROOT,
+            )
+            return
+
+        if data == "shell:exit":
+            user_id = update.effective_user.id
+            shell_sessions.end(user_id)
+            try:
+                await query.message.edit_text(
+                    "🔴 Shell fermé.",
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=_shell_closed_markup(),
+                )
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
             return
 
         parts = data.split(":", 2)
@@ -1751,6 +1944,13 @@ def build_app(cfg: Config) -> Application:
         ],
     )
     app.add_handler(proj_shell_conv)
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            auth(on_shell_message),
+        ),
+        group=-1,
+    )
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_error_handler(on_error)
 
@@ -1847,6 +2047,13 @@ def build_app(cfg: Config) -> Application:
         wizard_escape=_wizard_escape,
         run_action=_run_action_by_name,
         project_ops=_ProjectOps,
+    )
+
+    app.job_queue.run_repeating(
+        _check_expired_shell_sessions,
+        interval=60,
+        first=60,
+        name="shell_mode_cleanup",
     )
 
     return app
