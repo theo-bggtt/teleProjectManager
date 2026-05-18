@@ -276,10 +276,10 @@ async def _check_expired_shell_sessions(ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def on_shell_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     """Execute incoming text as a shell command when the user is in shell mode.
 
-    Registered in group=-1. If the user has no active shell session, returns
-    immediately so the message propagates to lower-priority handlers
-    (wizards, etc.). Otherwise raises ApplicationHandlerStop to prevent
-    propagation.
+    Registered in group=-2. If the user has no active shell session, returns
+    immediately so the message propagates to lower-priority groups (e.g.
+    group=-1 trading wizards, group=0 scheduler wizard). Otherwise raises
+    ApplicationHandlerStop to prevent any other group from running.
     """
     user_id = update.effective_user.id
     session = shell_sessions.get(user_id)
@@ -956,8 +956,9 @@ def build_app(cfg: Config) -> Application:
             elif target == "update":
                 await query.edit_message_text(
                     "⚠️ *Mettre à jour le bot ?*\n"
-                    "`git pull` sera exécuté dans le dossier du bot, puis le "
-                    "processus redémarrera.",
+                    "`git pull` sera exécuté dans le dossier du bot, les "
+                    "dépendances seront installées, puis le processus "
+                    "redémarrera.",
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=_bot_update_confirm_markup(),
                 )
@@ -995,10 +996,57 @@ def build_app(cfg: Config) -> Application:
                         ),
                     )
                     return
-                await query.edit_message_text(
-                    f"✅ *git pull OK*\n```\n{out}\n```\n🔄 *Redémarrage en cours…*",
-                    parse_mode=ParseMode.MARKDOWN,
-                )
+                pull_out = out
+                req_file = repo_dir / "requirements.txt"
+                if req_file.is_file():
+                    await query.edit_message_text(
+                        f"✅ *git pull OK*\n```\n{pull_out}\n```\n"
+                        f"📦 *Installation des dépendances…*\n`pip install -r requirements.txt`",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            sys.executable, "-m", "pip", "install",
+                            "--disable-pip-version-check",
+                            "-r", str(req_file),
+                            cwd=str(repo_dir),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.STDOUT,
+                        )
+                        raw, _ = await proc.communicate()
+                        pip_out = (raw.decode("utf-8", errors="replace") or "").strip() or "(aucune sortie)"
+                        pip_rc = proc.returncode
+                    except Exception as e:
+                        pip_out, pip_rc = f"Exception: {e}", -1
+                    # Keep only the tail of pip's output — it's verbose.
+                    if len(pip_out) > 2500:
+                        pip_out = "…(tronqué)\n" + pip_out[-2500:]
+                    if pip_rc != 0:
+                        await query.edit_message_text(
+                            f"✅ *git pull OK*\n"
+                            f"❌ *Échec de pip install* (code {pip_rc})\n```\n{pip_out}\n```\n"
+                            "Le bot n'a pas été redémarré.",
+                            parse_mode=ParseMode.MARKDOWN,
+                            reply_markup=_admin_menu_markup(
+                                scheduler_db_holder["sdb"].get_notifications_enabled()
+                                if scheduler_db_holder.get("sdb")
+                                else True
+                            ),
+                        )
+                        return
+                    await query.edit_message_text(
+                        f"✅ *git pull OK*\n"
+                        f"✅ *pip install OK*\n```\n{pip_out}\n```\n"
+                        "🔄 *Redémarrage en cours…*",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                else:
+                    await query.edit_message_text(
+                        f"✅ *git pull OK*\n```\n{pull_out}\n```\n"
+                        "ℹ️ Pas de `requirements.txt` trouvé — installation des "
+                        "dépendances ignorée.\n🔄 *Redémarrage en cours…*",
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
                 try:
                     notice_path = cfg.data_dir / ".restart_notice.json"
                     notice_path.write_text(json.dumps({
@@ -1972,12 +2020,17 @@ def build_app(cfg: Config) -> Application:
         ],
     )
     app.add_handler(proj_shell_conv)
+    # group=-2 so it runs in a group BEFORE the trading conv handlers
+    # (which sit in group=-1). When no shell session is active, this handler
+    # returns without ApplicationHandlerStop, letting group=-1 wizards
+    # (aadd/wadd) receive the text. Same-group propagation does not exist in
+    # PTB — a different group is required for fall-through.
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             auth(on_shell_message),
         ),
-        group=-1,
+        group=-2,
     )
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_error_handler(on_error)
