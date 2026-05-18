@@ -10,6 +10,7 @@ in step 9.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import TYPE_CHECKING
@@ -89,6 +90,14 @@ def _fmt_mc(mc: float) -> str:
     if mc >= 1e3:
         return f"{mc / 1e3:.2f}K"
     return f"{mc:.2f}"
+
+
+def _fmt_pct(p: float | None) -> str:
+    """±X.X% with a leading arrow, or '—' if missing."""
+    if p is None:
+        return "—"
+    arrow = "▲" if p >= 0 else "▼"
+    return f"{arrow}{abs(p):.1f}%"
 
 
 def register_handlers(
@@ -423,17 +432,49 @@ def register_handlers(
         alerts = db.list_alerts()
         if not alerts:
             text = "*Alertes MC*\nAucune. Utilise `/alert <token> <chain> <mc>`."
-        else:
-            lines = ["*Alertes MC*"]
-            for a in alerts:
-                arrow = "≥" if a["direction"] == "above" else "≤"
-                state = "🟢" if a["armed"] else "⚫"
-                label = f" — _{a['label']}_" if a["label"] else ""
-                lines.append(
-                    f"{state} *#{a['id']}* `{a['token_address']}` "
-                    f"{a['chain'].upper()} {arrow}${_fmt_mc(a['mc_target'])}{label}"
+            try:
+                await query.edit_message_text(
+                    text, parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=_alerts_markup(alerts),
                 )
-            text = "\n".join(lines)
+            except BadRequest as e:
+                if "not modified" not in str(e).lower():
+                    raise
+            return
+
+        # Fetch current token info concurrently. Dedup by (chain, address) so
+        # alerts pointing at the same token only trigger one API call (the
+        # PriceClient also caches, but dedup avoids creating N coroutines).
+        unique = {(a["chain"], a["token_address"]) for a in alerts}
+        results = await asyncio.gather(
+            *(monitor.price_client.get_token(addr, chain) for chain, addr in unique),
+            return_exceptions=True,
+        )
+        info_by_key: dict[tuple[str, str], object] = {}
+        for (chain, addr), res in zip(unique, results):
+            info_by_key[(chain, addr)] = None if isinstance(res, BaseException) else res
+
+        lines = ["*Alertes MC* — _MC actuelle · 1h / 6h / 24h_"]
+        for a in alerts:
+            arrow = "≥" if a["direction"] == "above" else "≤"
+            state = "🟢" if a["armed"] else "⚫"
+            label = f" — _{a['label']}_" if a["label"] else ""
+            info = info_by_key.get((a["chain"], a["token_address"]))
+            if info is not None and info.mc_usd is not None:
+                cur = (
+                    f"now *${_fmt_mc(info.mc_usd)}* · "
+                    f"{_fmt_pct(info.change_h1)} / "
+                    f"{_fmt_pct(info.change_h6)} / "
+                    f"{_fmt_pct(info.change_h24)}"
+                )
+            else:
+                cur = "_MC indisponible_"
+            lines.append(
+                f"{state} *#{a['id']}* `{a['token_address']}` "
+                f"{a['chain'].upper()} target {arrow}${_fmt_mc(a['mc_target'])}{label}\n"
+                f"  └ {cur}"
+            )
+        text = "\n".join(lines)
         try:
             await query.edit_message_text(
                 text, parse_mode=ParseMode.MARKDOWN, reply_markup=_alerts_markup(alerts),

@@ -42,6 +42,16 @@ CREATE TABLE IF NOT EXISTS seen_tx (
     seen_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (chain, sig_or_hash)
 );
+
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at    TEXT    NOT NULL,
+    total_usd   REAL    NOT NULL,
+    wallets_ok  INTEGER NOT NULL,
+    wallets_ko  INTEGER NOT NULL,
+    raw_json    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_taken_at ON portfolio_snapshots(taken_at);
 """
 
 
@@ -169,3 +179,40 @@ class TradingDB:
                 f"DELETE FROM seen_tx WHERE seen_at < datetime('now', '-{int(keep_last_days)} days')"
             )
             return cur.rowcount
+
+    # ── portfolio snapshots ────────────────────────────────────────────
+    def add_snapshot(
+        self,
+        *,
+        taken_at: str,
+        total_usd: float,
+        wallets_ok: int,
+        wallets_ko: int,
+        raw_json: Optional[str] = None,
+    ) -> int:
+        with self._conn() as c:
+            cur = c.execute(
+                """
+                INSERT INTO portfolio_snapshots
+                  (taken_at, total_usd, wallets_ok, wallets_ko, raw_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (taken_at, total_usd, wallets_ok, wallets_ko, raw_json),
+            )
+            return cur.lastrowid
+
+    def list_snapshots(self, since: Optional[str] = None) -> list[dict]:
+        """Return snapshots ordered by taken_at ASC. If `since` is given
+        (ISO 8601 UTC string), only snapshots with taken_at >= since."""
+        with self._conn() as c:
+            if since is None:
+                rows = c.execute(
+                    "SELECT * FROM portfolio_snapshots ORDER BY taken_at ASC"
+                ).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT * FROM portfolio_snapshots "
+                    "WHERE taken_at >= ? ORDER BY taken_at ASC",
+                    (since,),
+                ).fetchall()
+            return [dict(r) for r in rows]

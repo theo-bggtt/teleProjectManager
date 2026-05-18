@@ -34,6 +34,11 @@ class TokenInfo:
     mc_usd: Optional[float]            # market cap (or FDV fallback)
     liquidity_usd: Optional[float]
     pair_url: Optional[str]
+    # priceChange.* from Dexscreener — percentage variations over the
+    # canonical pair. None if the API omitted the bucket.
+    change_h1: Optional[float] = None
+    change_h6: Optional[float] = None
+    change_h24: Optional[float] = None
 
 
 # Map of internal chain shortcodes → Dexscreener chain ids (best-effort).
@@ -139,6 +144,13 @@ class PriceClient:
         except (TypeError, ValueError):
             mc = None
 
+        def _pct(bucket: str) -> Optional[float]:
+            v = (best.get("priceChange") or {}).get(bucket)
+            try:
+                return float(v) if v is not None else None
+            except (TypeError, ValueError):
+                return None
+
         return TokenInfo(
             address=base.get("address") or address,
             chain=wanted_chain,
@@ -148,4 +160,7 @@ class PriceClient:
             mc_usd=mc,
             liquidity_usd=_liq(best) or None,
             pair_url=best.get("url"),
+            change_h1=_pct("h1"),
+            change_h6=_pct("h6"),
+            change_h24=_pct("h24"),
         )
