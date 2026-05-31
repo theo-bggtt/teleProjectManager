@@ -11,10 +11,10 @@ data_dir = "./data"
 
 # Max duration for /shell commands (seconds). Long-running tasks should be
 # configured as a project and started with /run instead.
-shell_timeout = 30
+shell_timeout = 600
 
 # Default number of log lines /logs returns when no count is given.
-default_log_lines = 50
+default_log_lines = 150
 
 # ─────────────────────────────────────────────────────────────────────
 # Optional: trading / on-chain wallet monitoring module.
