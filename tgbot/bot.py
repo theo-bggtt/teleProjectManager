@@ -36,7 +36,7 @@ from .config import Config
 from .db import DB
 from .files import FileManager, PathEscapeError
 from .runner import make_runner
-from .shell import ShellRunner
+from .shell import ShellRunner, non_interactive_env
 from .trading import register_trading
 from .scheduler import register_scheduler
 from .shell_mode import (
@@ -973,6 +973,8 @@ def build_app(cfg: Config) -> Application:
                     proc = await asyncio.create_subprocess_exec(
                         "git", "pull", "--ff-only",
                         cwd=str(repo_dir),
+                        stdin=asyncio.subprocess.DEVNULL,
+                        env=non_interactive_env(),
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.STDOUT,
                     )
